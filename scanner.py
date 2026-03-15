@@ -1,7 +1,12 @@
 """
-Trading Signal Scanner — GitHub Actions Bot
-Prüft EMA/RSI/MACD nach unserem Kombinations-System
-Schickt Signale per Telegram wenn ein Setup triggert
+Trading Signal Scanner v2 — Dynamisch + Megatrend-Screening
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Neu in v2:
+  - Automatisches Megatrend-Screening (100+ Titel pro Sektor)
+  - Täglich Top-5 beste Setups aus dem gesamten Universum
+  - Morgen-Bericht mit Marktlage + besten Kandidaten
+  - Nachmittag-Bericht mit US-Open Kandidaten
+  - Intraday: nur echte Signale (Score >= MIN_SCORE)
 """
 
 import os
@@ -14,52 +19,85 @@ import anthropic
 
 # ── Konfiguration ──────────────────────────────────────────────────────────────
 
+MIN_SCORE       = 6     # Mindest-Score für Einzel-Signal (von 8)
+TOP_N           = 5     # Beste Setups im Tagesbericht
+ANTI_SPAM_HOURS = 6     # Stunden bis gleicher Ticker wieder gesendet wird
+
+# ── Feste Kern-Watchlist ───────────────────────────────────────────────────────
+
 WATCHLIST = {
-    # US-Aktien
-    "NVDA":  {"name": "NVIDIA",          "wkn": "918422",  "megatrend": "AI & Halbleiter", "market": "US"},
-    "ASML":  {"name": "ASML Holding",    "wkn": "A1J4U4",  "megatrend": "AI & Halbleiter", "market": "US"},
-    "AVGO":  {"name": "Broadcom",        "wkn": "A2JG9Z",  "megatrend": "AI & Halbleiter", "market": "US"},
-    "XOM":   {"name": "ExxonMobil",      "wkn": "852549",  "megatrend": "Energie",         "market": "US"},
-    "NVO":   {"name": "Novo Nordisk",    "wkn": "A1XA8R",  "megatrend": "Healthcare GLP-1","market": "US"},
-    "LLY":   {"name": "Eli Lilly",       "wkn": "858560",  "megatrend": "Healthcare GLP-1","market": "US"},
-    "PM":    {"name": "Philip Morris",   "wkn": "A14TQH",  "megatrend": "Defensiv",        "market": "US"},
-    # DAX
-    "RHM.DE": {"name": "Rheinmetall",   "wkn": "703000",  "megatrend": "Rüstung Europa",  "market": "DAX"},
-    "ZAL.DE": {"name": "Zalando",       "wkn": "ZAL111",  "megatrend": "E-Commerce",      "market": "DAX"},
-    "SIE.DE": {"name": "Siemens",       "wkn": "723610",  "megatrend": "Infrastruktur",   "market": "DAX"},
-    # ETFs/Indizes
-    "GLD":   {"name": "Gold ETF",        "wkn": "A0LP78",  "megatrend": "Gold Hedge",      "market": "ETF"},
-    "SPY":   {"name": "S&P 500 ETF",     "wkn": "A0AET0",  "megatrend": "Index",           "market": "ETF"},
+    "NVDA":   {"name": "NVIDIA",          "wkn": "918422",  "megatrend": "AI & Halbleiter", "market": "US"},
+    "ASML":   {"name": "ASML Holding",    "wkn": "A1J4U4",  "megatrend": "AI & Halbleiter", "market": "US"},
+    "AVGO":   {"name": "Broadcom",        "wkn": "A2JG9Z",  "megatrend": "AI & Halbleiter", "market": "US"},
+    "AMD":    {"name": "AMD",             "wkn": "A2N6GH",  "megatrend": "AI & Halbleiter", "market": "US"},
+    "MSFT":   {"name": "Microsoft",       "wkn": "870747",  "megatrend": "AI & Halbleiter", "market": "US"},
+    "XOM":    {"name": "ExxonMobil",      "wkn": "852549",  "megatrend": "Energie",         "market": "US"},
+    "SLB":    {"name": "SLB",             "wkn": "853390",  "megatrend": "Energie",         "market": "US"},
+    "NEE":    {"name": "NextEra Energy",  "wkn": "A0NH8V",  "megatrend": "Energie",         "market": "US"},
+    "NVO":    {"name": "Novo Nordisk",    "wkn": "A1XA8R",  "megatrend": "Healthcare GLP-1","market": "US"},
+    "LLY":    {"name": "Eli Lilly",       "wkn": "858560",  "megatrend": "Healthcare GLP-1","market": "US"},
+    "PM":     {"name": "Philip Morris",   "wkn": "A14TQH",  "megatrend": "Defensiv",        "market": "US"},
+    "GLD":    {"name": "Gold ETF",        "wkn": "A0LP78",  "megatrend": "Gold Hedge",      "market": "ETF"},
+    "GDX":    {"name": "Gold Miner ETF",  "wkn": "A0Q8NB",  "megatrend": "Gold Hedge",      "market": "ETF"},
+    "RHM.DE": {"name": "Rheinmetall",     "wkn": "703000",  "megatrend": "Rüstung Europa",  "market": "DAX"},
+    "SIE.DE": {"name": "Siemens",         "wkn": "723610",  "megatrend": "Infrastruktur",   "market": "DAX"},
+    "ZAL.DE": {"name": "Zalando",         "wkn": "ZAL111",  "megatrend": "E-Commerce",      "market": "DAX"},
+    "SAP.DE": {"name": "SAP",             "wkn": "716460",  "megatrend": "AI & Halbleiter", "market": "DAX"},
+    "SPY":    {"name": "S&P 500 ETF",     "wkn": "A0AET0",  "megatrend": "Index",           "market": "ETF"},
+    "QQQ":    {"name": "Nasdaq 100 ETF",  "wkn": "A0AET7",  "megatrend": "Index",           "market": "ETF"},
 }
 
-# Mindest-Score für Signal-Versand (von 8 Punkten)
-MIN_SCORE = 6
+# ── Megatrend-Universen (dynamisch gescannt) ───────────────────────────────────
 
-# Timeframe für Analyse
-PERIOD = "3mo"      # 3 Monate historische Daten
-INTERVAL = "1d"     # Daily-Kerzen (für Swing-Trading)
+MEGATREND_UNIVERSE = {
 
+    "AI & Halbleiter": [
+        "NVDA","ASML","AVGO","AMD","TSM","LRCX","KLAC","AMAT","MRVL",
+        "SMCI","ARM","INTC","QCOM","TXN","NXPI","ON","MPWR",
+        "CDNS","SNPS","CRM","NOW","PLTR","AI",
+    ],
 
-# ── Indikatoren berechnen ──────────────────────────────────────────────────────
+    "Rüstung Europa": [
+        "RHM.DE","BA","RTX","LMT","NOC","GD","HII","KTOS","AXON",
+    ],
+
+    "Energie & Power": [
+        "XOM","CVX","COP","SLB","HAL","BKR","PSX","VLO","MPC",
+        "NEE","CEG","VST","NRG","ETR","AEP","EXC","GEV",
+        "FSLR","ENPH",
+    ],
+
+    "Healthcare & GLP-1": [
+        "NVO","LLY","MRNA","VRTX","REGN","ABBV","BMY","MRK","PFE",
+        "JNJ","UNH","ABT","DHR","TMO","ISRG","SYK",
+    ],
+
+    "Gold & Rohstoffe": [
+        "GLD","GDX","GDXJ","SLV","GOLD","NEM","AEM","WPM","FNV",
+        "FCX","BHP","MP",
+    ],
+}
+
+# ── Indikatoren ────────────────────────────────────────────────────────────────
 
 def calc_ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
 def calc_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    delta    = series.diff()
+    gain     = delta.clip(lower=0)
+    loss     = -delta.clip(upper=0)
     avg_gain = gain.ewm(span=period, adjust=False).mean()
     avg_loss = loss.ewm(span=period, adjust=False).mean()
-    rs = avg_gain / avg_loss
+    rs       = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 def calc_macd(series, fast=12, slow=26, signal=9):
-    ema_fast = calc_ema(series, fast)
-    ema_slow = calc_ema(series, slow)
-    macd_line = ema_fast - ema_slow
+    ema_fast    = calc_ema(series, fast)
+    ema_slow    = calc_ema(series, slow)
+    macd_line   = ema_fast - ema_slow
     signal_line = calc_ema(macd_line, signal)
-    histogram = macd_line - signal_line
+    histogram   = macd_line - signal_line
     return macd_line, signal_line, histogram
 
 def calc_fibonacci(high, low):
@@ -72,330 +110,397 @@ def calc_fibonacci(high, low):
         "78.6": high - 0.786 * diff,
     }
 
+# ── Ticker analysieren ─────────────────────────────────────────────────────────
+
 def analyze_ticker(ticker_symbol):
-    """Analysiert einen Ticker und gibt Score + Details zurück"""
     try:
-        df = yf.download(ticker_symbol, period=PERIOD, interval=INTERVAL, progress=False)
+        df = yf.download(ticker_symbol, period="3mo", interval="1d", progress=False)
         if df.empty or len(df) < 50:
             return None
 
-        close = df["Close"].squeeze()
+        close  = df["Close"].squeeze()
         volume = df["Volume"].squeeze()
-        high_series = df["High"].squeeze()
-        low_series = df["Low"].squeeze()
+        high_s = df["High"].squeeze()
+        low_s  = df["Low"].squeeze()
 
-        # EMAs berechnen
         ema10  = calc_ema(close, 10)
         ema20  = calc_ema(close, 20)
         ema50  = calc_ema(close, 50)
         ema200 = calc_ema(close, 200)
-
-        # RSI
-        rsi = calc_rsi(close)
-
-        # MACD
+        rsi    = calc_rsi(close)
         macd_line, macd_signal, macd_hist = calc_macd(close)
 
-        # Aktuelle Werte (letzter Tag)
-        c   = float(close.iloc[-1])
-        e10 = float(ema10.iloc[-1])
-        e20 = float(ema20.iloc[-1])
-        e50 = float(ema50.iloc[-1])
-        e200= float(ema200.iloc[-1])
-        r   = float(rsi.iloc[-1])
-        ml  = float(macd_line.iloc[-1])
-        ms  = float(macd_signal.iloc[-1])
-        mh  = float(macd_hist.iloc[-1])
-        mh_prev = float(macd_hist.iloc[-2])
+        c    = float(close.iloc[-1])
+        e10  = float(ema10.iloc[-1])
+        e20  = float(ema20.iloc[-1])
+        e50  = float(ema50.iloc[-1])
+        e200 = float(ema200.iloc[-1])
+        r    = float(rsi.iloc[-1])
+        ml   = float(macd_line.iloc[-1])
+        ms   = float(macd_signal.iloc[-1])
+        mh   = float(macd_hist.iloc[-1])
+        mh_p = float(macd_hist.iloc[-2])
         vol_avg = float(volume.rolling(20).mean().iloc[-1])
         vol_now = float(volume.iloc[-1])
 
-        # Fibonacci (letzte 60 Tage)
-        period_high = float(high_series.iloc[-60:].max())
-        period_low  = float(low_series.iloc[-60:].min())
+        period_high = float(high_s.iloc[-60:].max())
+        period_low  = float(low_s.iloc[-60:].min())
         fib = calc_fibonacci(period_high, period_low)
 
-        # ── Scoring nach unserem Kombinations-System ──────────────────────────
-        score = 0
+        score  = 0
         checks = {}
 
-        # 1. EMA-Fächer (EMA10 > EMA20 > EMA50) — Gewicht 2
+        # 1. EMA-Fächer — Gewicht 2
         if e10 > e20 > e50:
             score += 2
-            checks["EMA-Fächer"] = f"✅ EMA10({e10:.2f}) > EMA20({e20:.2f}) > EMA50({e50:.2f})"
+            checks["EMA-Fächer"] = f"✅ {e10:.2f}>{e20:.2f}>{e50:.2f}"
         else:
-            checks["EMA-Fächer"] = f"❌ Nicht ausgerichtet"
+            checks["EMA-Fächer"] = "❌ Nicht ausgerichtet"
 
         # 2. Kurs über EMA200 — Gewicht 1
         if c > e200:
             score += 1
-            checks["EMA200"] = f"✅ Kurs({c:.2f}) > EMA200({e200:.2f})"
+            checks["EMA200"] = f"✅ {c:.2f}>{e200:.2f}"
         else:
-            checks["EMA200"] = f"❌ Kurs unter EMA200"
+            checks["EMA200"] = f"❌ Unter EMA200"
 
-        # 3. RSI Bullish Zone (45–70) — Gewicht 1
+        # 3. RSI — Gewicht 1
         if 45 <= r <= 70:
             score += 1
-            checks["RSI"] = f"✅ RSI={r:.1f} (Bullish Zone)"
+            checks["RSI"] = f"✅ {r:.1f} (Bullish Zone)"
         elif r < 30:
-            score += 1  # Überverkauft = Reversal-Chance
-            checks["RSI"] = f"⚡ RSI={r:.1f} (Überverkauft — Reversal)"
-        else:
-            checks["RSI"] = f"❌ RSI={r:.1f} (außerhalb Zone)"
-
-        # 4. MACD positiv und wachsend — Gewicht 1
-        if ml > ms and mh > mh_prev:
             score += 1
-            checks["MACD"] = f"✅ MACD über Signal, Histogramm wächst"
-        elif ml > ms:
-            score += 0
-            checks["MACD"] = f"⚠️ MACD über Signal, aber Momentum schwächer"
+            checks["RSI"] = f"⚡ {r:.1f} (Überverkauft)"
         else:
-            checks["MACD"] = f"❌ MACD unter Signal"
+            checks["RSI"] = f"❌ {r:.1f}"
 
-        # 5. Volumen über Durchschnitt — Gewicht 1
+        # 4. MACD — Gewicht 1
+        if ml > ms and mh > mh_p:
+            score += 1
+            checks["MACD"] = "✅ Positiv & wachsend"
+        else:
+            checks["MACD"] = "❌ Schwach"
+
+        # 5. Volumen — Gewicht 1
         if vol_now > vol_avg * 1.2:
             score += 1
-            checks["Volumen"] = f"✅ Vol={vol_now:,.0f} (+{((vol_now/vol_avg)-1)*100:.0f}% über Ø)"
+            checks["Volumen"] = f"✅ +{((vol_now/vol_avg)-1)*100:.0f}% über Ø"
         else:
-            checks["Volumen"] = f"⚠️ Volumen normal ({vol_now:,.0f} vs Ø {vol_avg:,.0f})"
+            checks["Volumen"] = "⚠️ Normal"
 
-        # 6. Fibonacci-Pullback auf 38.2–61.8% — Gewicht 2
-        in_fib_zone = fib["38.2"] >= c >= fib["61.8"]
-        near_fib    = fib["23.6"] >= c >= fib["78.6"]
-        if in_fib_zone:
+        # 6. Fibonacci — Gewicht 2
+        if fib["38.2"] >= c >= fib["61.8"]:
             score += 2
-            checks["Fibonacci"] = f"✅ Kurs in Goldener Zone (38.2–61.8%)"
-        elif near_fib:
+            checks["Fibonacci"] = "✅ Goldene Zone"
+        elif fib["23.6"] >= c >= fib["78.6"]:
             score += 1
-            checks["Fibonacci"] = f"⚠️ Kurs nahe Fib-Level"
+            checks["Fibonacci"] = "⚠️ Nahe Fib-Level"
         else:
-            checks["Fibonacci"] = f"❌ Kein Fib-Pullback erkennbar"
+            checks["Fibonacci"] = "❌ Kein Pullback"
 
-        # ── Richtungsbestimmung ──────────────────────────────────────────────
-        direction = "LONG" if (e10 > e20 and c > e200) else "NEUTRAL"
-        if e10 < e20 and c < e200:
+        # Richtung
+        if e10 > e20 and c > e200:
+            direction = "LONG"
+        elif e10 < e20 and c < e200:
             direction = "SHORT/MEIDEN"
+        else:
+            direction = "NEUTRAL"
 
-        # ── Stop-Loss und Take-Profit berechnen ──────────────────────────────
-        atr = float(close.diff().abs().rolling(14).mean().iloc[-1])  # ATR-Näherung
+        # Levels
+        atr       = float(close.diff().abs().rolling(14).mean().iloc[-1])
         stop_loss = round(c - (atr * 2.5), 2)
-        tp1 = round(c + (atr * 3.75), 2)  # R:R 1:1.5
-        tp2 = round(c + (atr * 6.25), 2)  # R:R 1:2.5
-        tsl_pct = round((atr * 2.5 / c) * 100, 1)
-        rr = round((tp1 - c) / (c - stop_loss), 1)
+        tp1       = round(c + (atr * 3.75), 2)
+        tp2       = round(c + (atr * 6.25), 2)
+        tsl_pct   = round((atr * 2.5 / c) * 100, 1)
+        rr        = round((tp1 - c) / max(c - stop_loss, 0.01), 1)
 
         return {
-            "ticker": ticker_symbol,
-            "score": score,
-            "max_score": 8,
-            "direction": direction,
-            "price": c,
+            "ticker": ticker_symbol, "score": score, "max_score": 8,
+            "direction": direction, "price": c,
             "ema10": e10, "ema20": e20, "ema50": e50, "ema200": e200,
-            "rsi": r,
-            "macd_line": ml, "macd_signal": ms, "macd_hist": mh,
-            "volume": vol_now, "vol_avg": vol_avg,
-            "fib": fib,
-            "stop_loss": stop_loss,
-            "tp1": tp1, "tp2": tp2,
-            "tsl_pct": tsl_pct,
-            "rr": rr,
-            "checks": checks,
-            "atr": atr,
+            "rsi": r, "macd_line": ml, "macd_signal": ms, "macd_hist": mh,
+            "volume": vol_now, "vol_avg": vol_avg, "fib": fib,
+            "stop_loss": stop_loss, "tp1": tp1, "tp2": tp2,
+            "tsl_pct": tsl_pct, "rr": rr, "checks": checks, "atr": atr,
         }
-
     except Exception as e:
-        print(f"Fehler bei {ticker_symbol}: {e}")
+        print(f"  Fehler {ticker_symbol}: {e}")
         return None
 
+# ── Megatrend-Universum scannen ────────────────────────────────────────────────
 
-# ── Claude Analyse anfordern ──────────────────────────────────────────────────
+def scan_megatrend_universe():
+    print("\n📡 Megatrend-Screening...")
+    results = []
+    seen    = set()
 
-def get_claude_signal(ticker_symbol, analysis, ticker_info):
-    """Erstellt ein vollständiges Signal mit Claude"""
+    for sektor, tickers in MEGATREND_UNIVERSE.items():
+        print(f"  {sektor} ({len(tickers)} Titel)...")
+        for ticker in tickers:
+            if ticker in seen:
+                continue
+            seen.add(ticker)
+            analysis = analyze_ticker(ticker)
+            if analysis and analysis["direction"] == "LONG":
+                info = WATCHLIST.get(ticker, {
+                    "name": ticker, "wkn": "→ suchen",
+                    "megatrend": sektor, "market": "US",
+                })
+                results.append({"ticker": ticker, "info": info,
+                                 "analysis": analysis, "sektor": sektor})
+
+    results.sort(key=lambda x: x["analysis"]["score"], reverse=True)
+    print(f"  → {len(results)} Long-Kandidaten")
+    return results
+
+# ── Claude Analyse ─────────────────────────────────────────────────────────────
+
+def get_claude_signal(ticker, analysis, info):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    checks_text = " | ".join([f"{k}: {v}" for k, v in analysis["checks"].items()])
+    prompt = f"""Erfahrener Trading-Analyst. Kurzes Signal für Telegram (max 180 Wörter):
 
-    checks_text = "\n".join([f"  {k}: {v}" for k, v in analysis["checks"].items()])
+{ticker} — {info.get('name',ticker)} | Score {analysis['score']}/8 | {analysis['direction']}
+Kurs: {analysis['price']:.2f} | RSI: {analysis['rsi']:.1f} | ATR: {analysis['atr']:.2f}
+Checks: {checks_text}
+Entry: {analysis['price']:.2f} | SL: {analysis['stop_loss']:.2f} | TP1: {analysis['tp1']:.2f} | TP2: {analysis['tp2']:.2f} | R:R 1:{analysis['rr']}
+Megatrend: {info.get('megatrend','-')}
 
-    prompt = f"""Du bist ein erfahrener Trading-Analyst. Erstelle ein präzises Signal für:
+Format: 1) Empfehlung 2) Begründung (2 Sätze) 3) Levels 4) Megatrend-Kontext. Emojis nutzen."""
 
-TICKER: {ticker_symbol} — {ticker_info['name']}
-MEGATREND: {ticker_info['megatrend']}
-SCORE: {analysis['score']}/8
-RICHTUNG: {analysis['direction']}
+    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=400,
+                                messages=[{"role": "user", "content": prompt}])
+    return r.content[0].text
 
-TECHNISCHE DATEN:
-- Kurs: {analysis['price']:.2f}
-- EMA10/20/50/200: {analysis['ema10']:.2f} / {analysis['ema20']:.2f} / {analysis['ema50']:.2f} / {analysis['ema200']:.2f}
-- RSI: {analysis['rsi']:.1f}
-- MACD Histogramm: {analysis['macd_hist']:.3f} (vorher: wachsend/fallend erkennbar)
-- ATR (14): {analysis['atr']:.2f}
+def get_claude_tagesbericht(top_results, markt_info):
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    kandidaten = ""
+    for i, r in enumerate(top_results[:5], 1):
+        a = r["analysis"]
+        kandidaten += (f"\n{i}. {r['ticker']} ({r['info'].get('name','')}) — "
+                       f"Score {a['score']}/8 | RSI {a['rsi']:.1f} | "
+                       f"Kurs {a['price']:.2f} | {r['sektor']}")
 
-SETUP-CHECK:
-{checks_text}
+    prompt = f"""Trading-Analyst. Tagesbericht für Telegram (max 220 Wörter):
 
-BERECHNETE LEVELS:
-- Entry: ~{analysis['price']:.2f}
-- Stop-Loss: {analysis['stop_loss']:.2f} (ATR-basiert, 2.5x ATR)
-- TP1 (50% bei): {analysis['tp1']:.2f}
-- TP2 (Rest): {analysis['tp2']:.2f}
-- R:R: 1:{analysis['rr']}
-- TSL-Abstand: {analysis['tsl_pct']}%
+Markt: {markt_info}
+Top-Kandidaten:{kandidaten}
 
-WKN: {ticker_info['wkn']}
+Format: 1) Marktlage (2 Sätze) 2) Top-3 Kandidaten (je 1 Satz Begründung) 3) Tagesempfehlung. Emojis nutzen."""
 
-Erstelle eine knappe, präzise Signal-Nachricht (max 280 Wörter) für Telegram mit:
-1. Klarer Handlungsempfehlung (Long/Abwarten/Meiden)
-2. Konkreter Begründung (2-3 Sätze)
-3. Entry/Stop/TP1/TP2 nochmals zusammengefasst
-4. TSL-Einstellung für Finanzen.Zero
-5. Megatrend-Kontext (1 Satz)
-6. Wichtige Risiken (1 Satz)
+    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=500,
+                                messages=[{"role": "user", "content": prompt}])
+    return r.content[0].text
 
-Formatiere mit Emojis für Telegram. Sei direkt und präzise, kein Blabla."""
-
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=600,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.content[0].text
-
-
-# ── Telegram senden ──────────────────────────────────────────────────────────
+# ── Telegram ───────────────────────────────────────────────────────────────────
 
 def send_telegram(message):
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    token   = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
+    url     = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message,
+                "parse_mode": "HTML", "disable_web_page_preview": True}
     r = requests.post(url, json=payload)
     if r.status_code != 200:
-        print(f"Telegram Fehler: {r.text}")
+        print(f"  Telegram Fehler: {r.text}")
     return r.status_code == 200
 
+# ── Spam-Schutz ────────────────────────────────────────────────────────────────
 
-
-
-
-# ── Bereits gesendete Signale tracken (verhindert Spam) ──────────────────────
-
-def load_sent_signals():
+def load_sent():
     try:
         with open("sent_signals.json", "r") as f:
             return json.load(f)
     except FileNotFoundError:
         return {}
 
-def save_sent_signals(signals):
+def save_sent(s):
     with open("sent_signals.json", "w") as f:
-        json.dump(signals, f)
+        json.dump(s, f)
 
-def was_recently_sent(ticker, sent_signals, hours=6):
-    """Prüft ob für diesen Ticker in den letzten X Stunden schon ein Signal gesendet wurde"""
-    if ticker not in sent_signals:
+def recently_sent(ticker, sent, hours=ANTI_SPAM_HOURS):
+    if ticker not in sent:
         return False
-    last = datetime.fromisoformat(sent_signals[ticker])
-    return datetime.now() - last < timedelta(hours=hours)
+    return datetime.now() - datetime.fromisoformat(sent[ticker]) < timedelta(hours=hours)
 
+# ── Markt-Snapshot ─────────────────────────────────────────────────────────────
 
-# ── Haupt-Scanner ─────────────────────────────────────────────────────────────
+def get_markt_snapshot():
+    snapshot = {}
+    for ticker, name in {"SPY": "S&P500", "QQQ": "Nasdaq", "GLD": "Gold"}.items():
+        try:
+            df = yf.download(ticker, period="5d", interval="1d", progress=False)
+            if not df.empty:
+                c  = df["Close"].squeeze()
+                ch = ((float(c.iloc[-1]) / float(c.iloc[-2])) - 1) * 100
+                snapshot[name] = f"{float(c.iloc[-1]):.0f} ({ch:+.1f}%)"
+        except:
+            pass
+    return " | ".join([f"{k}: {v}" for k, v in snapshot.items()])
+
+# ── Haupt-Scanner ──────────────────────────────────────────────────────────────
 
 def run_scan():
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    print(f"\n{'='*50}")
-    print(f"Signal-Scan gestartet: {now}")
-    print(f"Watchlist: {len(WATCHLIST)} Titel")
-    print(f"{'='*50}")
-
-    sent_signals = load_sent_signals()
-    signals_found = []
-    scan_summary = []
-
-    for ticker, info in WATCHLIST.items():
-        print(f"\nAnalysiere {ticker} ({info['name']})...")
-        analysis = analyze_ticker(ticker)
-
-        if analysis is None:
-            print(f"  → Keine Daten")
-            continue
-
-        score = analysis["score"]
-        direction = analysis["direction"]
-        print(f"  Score: {score}/8 | Richtung: {direction} | RSI: {analysis['rsi']:.1f}")
-        scan_summary.append(f"{ticker}: {score}/8 — {direction}")
-
-        # Signal nur senden wenn Score erreicht und kein Spam
-        if score >= MIN_SCORE and direction == "LONG":
-            if was_recently_sent(ticker, sent_signals, hours=6):
-                print(f"  → Signal vor <6h schon gesendet — übersprungen")
-                continue
-
-            print(f"  🚨 SIGNAL GEFUNDEN — Score {score}/8!")
-
-            # Claude für vollständige Analyse anfragen
-            try:
-                claude_text = get_claude_signal(ticker, analysis, info)
-            except Exception as e:
-                print(f"  Claude-Fehler: {e}")
-                claude_text = "Claude-Analyse nicht verfügbar."
-
-            # Telegram-Nachricht formatieren
-            stars = "⭐" * (1 if score == 6 else 2 if score == 7 else 3)
-            megatrend_tag = f"🔥 <b>MEGATREND: {info['megatrend']}</b>\n" if info['megatrend'] != "Defensiv" else ""
-
-            message = (
-                f"📊 <b>TRADING SIGNAL — {ticker}</b> {stars}\n"
-                f"<b>{info['name']}</b> | Score: <b>{score}/8</b> | {now}\n"
-                f"{megatrend_tag}"
-                f"{'─'*30}\n"
-                f"{claude_text}\n"
-                f"{'─'*30}\n"
-                f"📌 <b>WKN (Aktie):</b> <code>{info['wkn']}</code>\n"
-                f"🔧 <b>KO/OS:</b> HSBC: hsbc-zertifikate.de → {ticker} → Turbo Long\n"
-                f"📱 <b>Finanzen.Zero TSL:</b> {analysis['tsl_pct']}% Abstand\n"
-                f"⚠️ <i>Kein Anlageberater — eigene Analyse!</i>"
-            )
-
-            if send_telegram(message):
-                sent_signals[ticker] = datetime.now().isoformat()
-                signals_found.append(ticker)
-                print(f"  ✅ Telegram gesendet")
-
-            else:
-                print(f"  ❌ Telegram-Versand fehlgeschlagen")
-
-    save_sent_signals(sent_signals)
-
-    # Scan-Zusammenfassung für Morgen/Nachmittag-Berichte
+    now  = datetime.now().strftime("%d.%m.%Y %H:%M")
     hour = datetime.now().hour
-    is_morning_report = 8 <= hour <= 10
-    is_afternoon_report = 16 <= hour <= 17
+    sent = load_sent()
 
-    if is_morning_report or is_afternoon_report:
-        report_type = "🌅 MORGEN-SCAN" if is_morning_report else "🌆 NACHMITTAG-SCAN"
-        if not signals_found:
-            summary_msg = (
-                f"{report_type} — {now}\n\n"
-                f"📋 Kein Signal hat unsere Kriterien erfüllt (Min. Score {MIN_SCORE}/8)\n\n"
-                f"<b>Scan-Übersicht:</b>\n"
-                + "\n".join(scan_summary) +
-                f"\n\n💤 Markt abwarten — kein Einstieg erzwingen."
-            )
-            send_telegram(summary_msg)
-            print(f"\n→ Kein Signal. Zusammenfassung gesendet.")
-        else:
-            print(f"\n✅ {len(signals_found)} Signal(e) gesendet: {', '.join(signals_found)}")
+    is_morning   = 7  <= hour <= 9
+    is_afternoon = 14 <= hour <= 16
+
+    print(f"\n{'='*55}")
+    print(f"Trading Scanner v2 — {now}")
+    mode = "MORGEN" if is_morning else "NACHMITTAG" if is_afternoon else "INTRADAY"
+    print(f"Modus: {mode}")
+    print(f"{'='*55}")
+
+    # ── TAGESBERICHT (Morgen / Nachmittag) ────────────────────────────────────
+    if is_morning or is_afternoon:
+
+        all_results = []
+        seen        = set()
+
+        # Kern-Watchlist
+        print("\n📋 Kern-Watchlist...")
+        for ticker, info in WATCHLIST.items():
+            if ticker in seen:
+                continue
+            seen.add(ticker)
+            a = analyze_ticker(ticker)
+            if a:
+                print(f"  {ticker}: {a['score']}/8 | {a['direction']}")
+                if a["direction"] == "LONG":
+                    all_results.append({"ticker": ticker, "info": info,
+                                        "analysis": a, "sektor": info["megatrend"]})
+
+        # Megatrend-Universum
+        for r in scan_megatrend_universe():
+            if r["ticker"] not in seen:
+                seen.add(r["ticker"])
+                all_results.append(r)
+
+        # Top-5
+        all_results.sort(key=lambda x: x["analysis"]["score"], reverse=True)
+        top5 = all_results[:TOP_N]
+
+        print(f"\n🏆 Top-{TOP_N}:")
+        for i, r in enumerate(top5, 1):
+            a = r["analysis"]
+            print(f"  {i}. {r['ticker']} Score {a['score']}/8 | RSI {a['rsi']:.1f} | {r['sektor']}")
+
+        markt_info = get_markt_snapshot()
+
+        print("\n📝 Claude erstellt Tagesbericht...")
+        try:
+            bericht = get_claude_tagesbericht(top5, markt_info)
+        except Exception as e:
+            print(f"  Fehler: {e}")
+            bericht = "Analyse nicht verfügbar."
+
+        emoji = "🌅" if is_morning else "🌆"
+        label = "MORGEN-BERICHT" if is_morning else "NACHMITTAG-BERICHT"
+
+        # Header + Claude-Bericht
+        msg = (f"{emoji} <b>{label} — {now}</b>\n"
+               f"📊 {markt_info}\n"
+               f"{'─'*32}\n"
+               f"{bericht}\n"
+               f"{'─'*32}\n"
+               f"🏆 <b>Top-{TOP_N} Setups (8-Punkte-System):</b>\n")
+
+        # Top-5 Liste
+        for i, r in enumerate(top5, 1):
+            a     = r["analysis"]
+            stars = "⭐" * (1 if a["score"] == 6 else 2 if a["score"] == 7 else 3)
+            msg  += (f"\n{i}. <b>{r['ticker']}</b> {stars} Score {a['score']}/8\n"
+                     f"   💰 {a['price']:.2f} | 🛑 {a['stop_loss']:.2f} | "
+                     f"🎯 {a['tp1']:.2f} | R:R 1:{a['rr']}\n"
+                     f"   📌 <code>{r['info'].get('wkn','→ suchen')}</code> | "
+                     f"TSL {a['tsl_pct']}% | {r['sektor']}\n")
+
+        msg += "\n⚠️ <i>Kein Anlageberater — eigene Analyse!</i>"
+
+        if len(msg) > 4000:
+            msg = msg[:3950] + "\n...\n⚠️ <i>Kein Anlageberater!</i>"
+
+        send_telegram(msg)
+        print(f"\n✅ {label} gesendet")
+
+        # Echte Signale zusätzlich einzeln senden
+        for r in top5:
+            a = r["analysis"]
+            if a["score"] >= MIN_SCORE and not recently_sent(r["ticker"], sent):
+                print(f"\n🚨 Einzel-Signal: {r['ticker']} {a['score']}/8")
+                try:
+                    sig = get_claude_signal(r["ticker"], a, r["info"])
+                    stars = "⭐" * (1 if a["score"] == 6 else 2 if a["score"] == 7 else 3)
+                    sig_msg = (
+                        f"🚨 <b>SIGNAL — {r['ticker']}</b> {stars}\n"
+                        f"<b>{r['info'].get('name', r['ticker'])}</b> | Score <b>{a['score']}/8</b>\n"
+                        f"🔥 <b>MEGATREND: {r['sektor']}</b>\n"
+                        f"{'─'*32}\n{sig}\n{'─'*32}\n"
+                        f"📌 WKN: <code>{r['info'].get('wkn','→ suchen')}</code>\n"
+                        f"🔧 KO: hsbc-zertifikate.de → {r['ticker']} → Turbo Long\n"
+                        f"📱 TSL: {a['tsl_pct']}% | R:R 1:{a['rr']}\n"
+                        f"⚠️ <i>Kein Anlageberater!</i>"
+                    )
+                    if send_telegram(sig_msg):
+                        sent[r["ticker"]] = datetime.now().isoformat()
+                        print(f"  ✅ Gesendet")
+                except Exception as e:
+                    print(f"  Fehler: {e}")
+
+    # ── INTRADAY: Nur echte Signale ───────────────────────────────────────────
     else:
-        if signals_found:
-            print(f"\n✅ Intraday-Signal(e) gesendet: {', '.join(signals_found)}")
+        print("\n🔍 Intraday-Scan...")
+        intraday = dict(WATCHLIST)
+        # Pro Sektor zusätzlich Top-5 Titel
+        for sektor, tickers in MEGATREND_UNIVERSE.items():
+            for t in tickers[:5]:
+                if t not in intraday:
+                    intraday[t] = {"name": t, "wkn": "→ suchen",
+                                   "megatrend": sektor, "market": "US"}
+
+        signals_found = []
+        for ticker, info in intraday.items():
+            a = analyze_ticker(ticker)
+            if not a:
+                continue
+            print(f"  {ticker}: {a['score']}/8 | {a['direction']} | RSI {a['rsi']:.1f}")
+
+            if a["score"] >= MIN_SCORE and a["direction"] == "LONG":
+                if recently_sent(ticker, sent):
+                    print(f"  → Bereits gesendet")
+                    continue
+                print(f"  🚨 SIGNAL!")
+                try:
+                    sig = get_claude_signal(ticker, a, info)
+                except Exception as e:
+                    sig = "Analyse nicht verfügbar."
+
+                stars   = "⭐" * (1 if a["score"] == 6 else 2 if a["score"] == 7 else 3)
+                sig_msg = (
+                    f"📊 <b>SIGNAL — {ticker}</b> {stars}\n"
+                    f"<b>{info.get('name',ticker)}</b> | Score <b>{a['score']}/8</b> | {now}\n"
+                    f"🔥 <b>MEGATREND: {info['megatrend']}</b>\n"
+                    f"{'─'*32}\n{sig}\n{'─'*32}\n"
+                    f"📌 WKN: <code>{info.get('wkn','→ suchen')}</code>\n"
+                    f"🔧 KO: hsbc-zertifikate.de → {ticker} → Turbo Long\n"
+                    f"📱 TSL: {a['tsl_pct']}% | R:R 1:{a['rr']}\n"
+                    f"⚠️ <i>Kein Anlageberater!</i>"
+                )
+                if send_telegram(sig_msg):
+                    sent[ticker] = datetime.now().isoformat()
+                    signals_found.append(ticker)
+                    print(f"  ✅ Gesendet")
+
+        if not signals_found:
+            print("\n→ Keine Signale.")
         else:
-            print(f"\n→ Kein Signal bei diesem Scan.")
+            print(f"\n✅ {len(signals_found)} Signal(e): {', '.join(signals_found)}")
+
+    save_sent(sent)
+    print("\nScan abgeschlossen.")
 
 
 if __name__ == "__main__":
