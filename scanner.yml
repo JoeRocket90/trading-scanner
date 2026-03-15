@@ -2,12 +2,16 @@ name: 📈 Trading Signal Scanner
 
 on:
   schedule:
-    - cron: "0 7 * * 1-5"
-    - cron: "0 9 * * 1-5"
-    - cron: "0 11 * * 1-5"
-    - cron: "0 13 * * 1-5"
-    - cron: "30 14 * * 1-5"
-    - cron: "0 18 * * 1-5"
+    - cron: "0 7 * * 1-5"     # 09:00 MEZ — Morgen-Bericht
+    - cron: "0 9 * * 1-5"     # 11:00 MEZ — Intraday
+    - cron: "0 11 * * 1-5"    # 13:00 MEZ — Intraday
+    - cron: "0 13 * * 1-5"    # 15:00 MEZ — Intraday
+    - cron: "30 14 * * 1-5"   # 16:30 MEZ — Nachmittag / US-Open
+    - cron: "0 17 * * 1-5"    # 19:00 MEZ — US-Mitte
+    - cron: "0 18 * * 1-5"    # 20:00 MEZ — Intraday
+    - cron: "0 19 * * 1-5"    # 21:00 MEZ — Intraday
+    - cron: "0 20 * * 1-5"    # 22:00 MEZ — US-Schluss
+    - cron: "0 21 * * 1-5"    # 23:00 MEZ — After-Hours
   workflow_dispatch:
 
 env:
