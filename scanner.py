@@ -280,26 +280,7 @@ def send_telegram(message):
     return r.status_code == 200
 
 
-def send_email(subject, body):
-    """Optional: E-Mail via Gmail SMTP"""
-    import smtplib
-    from email.mime.text import MIMEText
-    try:
-        gmail_user = os.environ.get("GMAIL_USER")
-        gmail_pass = os.environ.get("GMAIL_APP_PASSWORD")
-        to_email   = os.environ.get("TO_EMAIL")
-        if not all([gmail_user, gmail_pass, to_email]):
-            return  # E-Mail nicht konfiguriert — überspringen
-        msg = MIMEText(body, "plain", "utf-8")
-        msg["Subject"] = subject
-        msg["From"] = gmail_user
-        msg["To"] = to_email
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(gmail_user, gmail_pass)
-            server.sendmail(gmail_user, [to_email], msg.as_string())
-        print("E-Mail gesendet")
-    except Exception as e:
-        print(f"E-Mail Fehler: {e}")
+
 
 
 # ── Bereits gesendete Signale tracken (verhindert Spam) ──────────────────────
@@ -386,11 +367,6 @@ def run_scan():
                 signals_found.append(ticker)
                 print(f"  ✅ Telegram gesendet")
 
-                # Auch per E-Mail falls konfiguriert
-                send_email(
-                    f"Trading Signal: {ticker} Score {score}/8",
-                    message.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","").replace("<code>","").replace("</code>","")
-                )
             else:
                 print(f"  ❌ Telegram-Versand fehlgeschlagen")
 
