@@ -1,0 +1,58 @@
+name: 📈 Trading Signal Scanner
+
+on:
+  schedule:
+    # ── Morgen-Bericht: Mo–Fr 09:00 MEZ (= 08:00 UTC Sommer / 07:00 UTC Winter)
+    - cron: "0 7 * * 1-5"
+
+    # ── Intraday-Scan alle 2 Stunden: 10:00, 12:00, 14:00 MEZ (Börsenzeiten)
+    - cron: "0 9 * * 1-5"
+    - cron: "0 11 * * 1-5"
+    - cron: "0 13 * * 1-5"
+
+    # ── Nachmittag-Scan US-Open: 16:30 MEZ (= 15:30 UTC Sommer)
+    - cron: "30 14 * * 1-5"
+
+    # ── Abend-Scan: 20:00 MEZ — nach US-Handelsschluss
+    - cron: "0 18 * * 1-5"
+
+  # Manueller Trigger zum Testen
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Python Setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Abhängigkeiten installieren
+        run: |
+          pip install anthropic yfinance pandas requests --quiet
+
+      - name: Signal-Scan ausführen
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Optional: E-Mail
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+        run: |
+          python scripts/scanner.py
+
+      - name: Scan-Log speichern
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-log-${{ github.run_number }}
+          path: sent_signals.json
+          retention-days: 7
