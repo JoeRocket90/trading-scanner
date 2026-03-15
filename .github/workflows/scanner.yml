@@ -1,0 +1,49 @@
+name: 📈 Trading Signal Scanner
+
+on:
+  schedule:
+    # Morgen-Bericht: Mo–Fr 09:00 MEZ (Sommer = UTC+2 → 07:00 UTC)
+    - cron: "0 7 * * 1-5"
+    # Intraday-Scans
+    - cron: "0 9 * * 1-5"
+    - cron: "0 11 * * 1-5"
+    - cron: "0 13 * * 1-5"
+    # Nachmittag US-Open: 16:30 MEZ
+    - cron: "30 14 * * 1-5"
+    # Abend nach US-Schluss
+    - cron: "0 18 * * 1-5"
+
+  # Manueller Test-Button
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Python Setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Abhängigkeiten installieren
+        run: pip install anthropic yfinance pandas requests --quiet
+
+      - name: Signal-Scan ausführen
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scripts/scanner.py
+
+      - name: Log speichern
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-log-${{ github.run_number }}
+          path: sent_signals.json
+          retention-days: 7
