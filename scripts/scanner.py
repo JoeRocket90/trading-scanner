@@ -226,40 +226,43 @@ def analyze_ticker(ticker_symbol):
         print("  Fehler " + ticker_symbol + ": " + str(e))
         return None
 
-# ── AUTO-DERIVATE-SUCHE via Boerse Frankfurt JSON-API (v4.1) ──────────────────
+# ── AUTO-DERIVATE-SUCHE v4.2 (onvista JSON-API) ──────────────────────────────
 #
-# finanzen.net laed Tabellen via JavaScript → BeautifulSoup sieht leeren HTML.
-# Loesung: Boerse Frankfurt REST-API gibt echtes JSON zurueck.
-# Endpoint: https://api.boerse-frankfurt.de/v1/search/derivatives
-# Keine Authentifizierung noetig, stabil und schnell.
+# Strategie: onvista JSON-API (stabiles JSON, kein JS-Rendering noetig)
+# Finanzen.Zero / gettex Emittenten: HSBC, Goldman, Morgan Stanley, Vontobel, UBS, HVB
+#
+# System-Parameter nach unserem Trading-System:
+#   KO Long : Hebel 3-6x | KO-Schwelle mind. 8% unter Entry-Kurs
+#   OS Call : Hebel 3-8x | Restlaufzeit mind. 90 Tage
 
-BF_API   = "https://api.boerse-frankfurt.de/v1/search/derivatives"
-BF_HEADS = {
+ONVISTA_HEADS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0",
     "Accept":     "application/json",
-    "Origin":     "https://www.boerse-frankfurt.de",
-    "Referer":    "https://www.boerse-frankfurt.de/",
+    "Referer":    "https://www.onvista.de/",
 }
 
-EMITTENT_MAP = {
-    "HSBC":         "HSBC",
-    "Goldman":      "Goldman",
-    "GS":           "Goldman",
-    "Morgan":       "MS",
-    "Vontobel":     "Vontobel",
-    "UBS":          "UBS",
-    "HVB":          "HVB",
-    "Citi":         "Citi",
-    "BNP":          "BNP",
-    "Société":      "SocGen",
-    "DZ":           "DZ Bank",
+# Nur diese Emittenten sind auf gettex / Finanzen.Zero handelbar
+GETTEX_EMITTENTEN = {
+    "hsbc", "goldman", "gs bank", "morgan stanley",
+    "vontobel", "ubs", "hvb", "unicredit", "hypo"
+}
+EMITTENT_KURZ = {
+    "hsbc":           "HSBC",
+    "goldman":        "Goldman",
+    "gs bank":        "Goldman",
+    "morgan stanley": "Morgan S.",
+    "vontobel":       "Vontobel",
+    "ubs":            "UBS",
+    "hvb":            "HVB",
+    "unicredit":      "HVB",
+    "hypo":           "HVB",
 }
 
 
 def fetch_derivate(ticker, info, entry_price):
     """
-    Hauptfunktion: holt KO-Scheine + Optionsscheine via Boerse Frankfurt API.
-    Filtert: Hebel 3-6x (KO) / 3-8x (OS), KO-Schwelle >8% unter Entry.
+    Hauptfunktion: holt KO-Scheine + OS via onvista JSON-API.
+    Filtert auf gettex-Emittenten + System-Parameter.
     """
     isin = info.get("isin", "")
     slug = info.get("slug", ticker.lower().replace(".de", ""))
@@ -267,25 +270,35 @@ def fetch_derivate(ticker, info, entry_price):
     if not isin:
         return _derivate_fallback(slug)
 
-    ko_results = _fetch_ko_api(isin, entry_price)
-    os_result  = _fetch_os_api(isin, entry_price)
+    # Schritt 1: onvista Entity-ID via ISIN ermitteln
+    entity = _get_onvista_entity(isin)
+
+    ko_results = []
+    os_result  = None
+
+    if entity:
+        ko_results = _fetch_ko_onvista(entity, entry_price)
+        os_result  = _fetch_os_onvista(entity, entry_price)
 
     lines = []
 
     if ko_results:
-        lines.append("🔴 <b>Knock-Out Long:</b>")
+        lines.append("🔴 <b>KO Long (gettex):</b>")
         for ko in ko_results[:2]:
             lines.append(
                 "  • WKN <code>" + ko["wkn"] + "</code>"
                 + " | " + ko.get("emittent", "—")
                 + " | Hebel " + ko.get("hebel", "?") + "x"
-                + " | KO-Lvl " + ko.get("barrier", "?")
+                + " | KO " + ko.get("barrier", "?")
             )
     else:
-        lines.append("🔴 KO Long: hsbc-zertifikate.de → " + slug + " → Turbo Long")
+        lines.append(
+            "🔴 KO Long: <a href=\"https://www.hsbc-zertifikate.de/home/alle-produkte/hebel/turbo-bull-bear.html\">HSBC</a>"
+            + " | ISIN: " + isin
+        )
 
     if os_result:
-        lines.append("🟡 <b>Optionsschein Call:</b>")
+        lines.append("🟡 <b>OS Call (gettex):</b>")
         lines.append(
             "  • WKN <code>" + os_result["wkn"] + "</code>"
             + " | " + os_result.get("emittent", "—")
@@ -293,69 +306,108 @@ def fetch_derivate(ticker, info, entry_price):
             + " | Laufzeit " + os_result.get("laufzeit", "?")
         )
     else:
-        lines.append("🟡 OS Call: finanzen.net → " + slug + " → Optionsscheine")
+        lines.append(
+            "🟡 OS Call: finanzen.net → " + slug + " → Optionsscheine"
+        )
 
     return "\n".join(lines)
 
 
-def _fetch_ko_api(isin, entry_price):
-    """Holt Knock-Out Calls via Boerse Frankfurt API."""
+def _get_onvista_entity(isin):
+    """Sucht onvista Entity-ID via ISIN. Gibt dict {type, id} zurueck oder None."""
+    try:
+        url  = "https://api.onvista.de/api/v1/instruments/search/query"
+        resp = requests.get(url, params={"query": isin, "limit": 5},
+                            headers=ONVISTA_HEADS, timeout=10)
+        if resp.status_code != 200:
+            print("  onvista Entity: HTTP " + str(resp.status_code))
+            return None
+
+        data  = resp.json()
+        items = data.get("items", data if isinstance(data, list) else [])
+
+        for item in items:
+            isin_check = str(item.get("isin", ""))
+            if isin_check.upper() == isin.upper():
+                etype = str(item.get("entityType", "STOCK"))
+                eid   = str(item.get("entityValue", item.get("id", "")))
+                if eid:
+                    print("  onvista Entity OK: " + etype + "/" + eid)
+                    return {"type": etype, "id": eid}
+
+        # Fallback: erstes Ergebnis nehmen
+        if items:
+            first = items[0]
+            etype = str(first.get("entityType", "STOCK"))
+            eid   = str(first.get("entityValue", first.get("id", "")))
+            if eid:
+                print("  onvista Entity (Fallback): " + etype + "/" + eid)
+                return {"type": etype, "id": eid}
+
+    except Exception as e:
+        print("  onvista Entity Fehler: " + str(e))
+    return None
+
+
+def _fetch_ko_onvista(entity, entry_price):
+    """Holt KO-Calls via onvista Derivate-API, filtert nach System-Parametern."""
     results        = []
-    ko_max_barrier = entry_price * 0.92  # KO mind. 8% unter Entry
+    ko_max_barrier = entry_price * 0.92   # mind. 8% Abstand (System-Regel)
+    ko_min_barrier = entry_price * 0.60   # max 40% Abstand (sinnvoller Hebel)
+
+    url = ("https://api.onvista.de/api/v1/instruments/"
+           + entity["type"] + "/" + entity["id"]
+           + "/derivatives/list")
 
     params = {
-        "underlyingIsin": isin,
-        "productType":    "KNOCK_OUT",
-        "callPut":        "CALL",
-        "leverageFrom":   "3",
-        "leverageTo":     "6",
-        "pageSize":       "30",
-        "pageNumber":     "1",
-        "sortField":      "leverage",
-        "sortOrder":      "asc",
+        "derivativeCategory": "KNOCK_OUT",
+        "derivativeType":     "CALL",
+        "sortType":           "LEVERAGE_ASC",
+        "limit":              "50",
+        "offset":             "0",
     }
 
     try:
-        resp = requests.get(BF_API, params=params, headers=BF_HEADS, timeout=12)
+        resp = requests.get(url, params=params, headers=ONVISTA_HEADS, timeout=12)
         if resp.status_code != 200:
-            print("  KO-API: HTTP " + str(resp.status_code))
+            print("  KO onvista: HTTP " + str(resp.status_code))
             return []
 
         data  = resp.json()
-        items = data.get("data", data.get("derivatives", data.get("items", [])))
-
-        if not items and isinstance(data, list):
-            items = data
-
-        print("  KO-API: " + str(len(items)) + " Treffer fuer ISIN " + isin)
+        items = data.get("list", data.get("items", data if isinstance(data, list) else []))
+        print("  KO onvista: " + str(len(items)) + " Treffer")
 
         for item in items:
             try:
-                wkn     = str(item.get("wkn", item.get("WKN", ""))).strip()
-                barrier = _safe_float(item.get("knockOutBarrier",
-                           item.get("barrier",
-                           item.get("knockoutLevel", 0))))
-                hebel   = _safe_float(item.get("leverage",
-                           item.get("leverageFactor",
-                           item.get("hebel", 0))))
-                emittent_raw = str(item.get("issuerName",
-                                   item.get("emittent",
-                                   item.get("issuer", ""))))
+                wkn          = str(item.get("wkn", "")).strip().upper()
+                emittent_raw = str(item.get("issuer", item.get("emittent", ""))).lower()
+                barrier      = _sf(item.get("knockOutBarrier",
+                                   item.get("barrier",
+                                   item.get("knockoutLevel",
+                                   item.get("strikePrice", 0)))))
+                hebel        = _sf(item.get("leverage",
+                                   item.get("leverageFactor",
+                                   item.get("gearing", 0))))
 
+                # gettex-Filter: nur erlaubte Emittenten
+                if not _is_gettex_emittent(emittent_raw):
+                    continue
                 if not wkn or len(wkn) < 4:
                     continue
-                if barrier <= 0 or barrier >= ko_max_barrier:
+                # KO-Abstand: mind. 8%, max. 40% unter Entry
+                if barrier <= 0:
                     continue
+                if barrier >= ko_max_barrier or barrier < ko_min_barrier:
+                    continue
+                # Hebel-Filter 3-6x
                 if not (3.0 <= hebel <= 6.0):
                     continue
-
-                emittent = _map_emittent(emittent_raw)
 
                 results.append({
                     "wkn":      wkn,
                     "hebel":    str(round(hebel, 1)),
                     "barrier":  str(round(barrier, 2)),
-                    "emittent": emittent,
+                    "emittent": _map_emittent(emittent_raw),
                 })
 
                 if len(results) >= 2:
@@ -365,77 +417,96 @@ def _fetch_ko_api(isin, entry_price):
                 continue
 
     except Exception as e:
-        print("  KO-API Fehler: " + str(e))
+        print("  KO onvista Fehler: " + str(e))
 
     return results
 
 
-def _fetch_os_api(isin, entry_price):
-    """Holt Optionsschein Call via Boerse Frankfurt API."""
+def _fetch_os_onvista(entity, entry_price):
+    """Holt OS-Calls via onvista Derivate-API, filtert nach System-Parametern."""
+    from datetime import datetime, timedelta
+    min_expiry = datetime.now() + timedelta(days=90)  # mind. 3 Monate Laufzeit
+
+    url = ("https://api.onvista.de/api/v1/instruments/"
+           + entity["type"] + "/" + entity["id"]
+           + "/derivatives/list")
+
     params = {
-        "underlyingIsin": isin,
-        "productType":    "WARRANT",
-        "callPut":        "CALL",
-        "leverageFrom":   "3",
-        "leverageTo":     "8",
-        "pageSize":       "20",
-        "pageNumber":     "1",
-        "sortField":      "leverage",
-        "sortOrder":      "asc",
+        "derivativeCategory": "WARRANT",
+        "derivativeType":     "CALL",
+        "sortType":           "LEVERAGE_ASC",
+        "limit":              "50",
+        "offset":             "0",
     }
 
     try:
-        resp = requests.get(BF_API, params=params, headers=BF_HEADS, timeout=12)
+        resp = requests.get(url, params=params, headers=ONVISTA_HEADS, timeout=12)
         if resp.status_code != 200:
             return None
 
         data  = resp.json()
-        items = data.get("data", data.get("derivatives", data.get("items", [])))
-        if not items and isinstance(data, list):
-            items = data
-
-        print("  OS-API: " + str(len(items)) + " Treffer")
+        items = data.get("list", data.get("items", data if isinstance(data, list) else []))
+        print("  OS onvista: " + str(len(items)) + " Treffer")
 
         for item in items:
             try:
-                wkn     = str(item.get("wkn", item.get("WKN", ""))).strip()
-                hebel   = _safe_float(item.get("leverage",
-                           item.get("leverageFactor",
-                           item.get("hebel", 0))))
-                expiry  = str(item.get("expiryDate",
-                              item.get("maturityDate",
-                              item.get("laufzeit", "?"))))
-                emittent_raw = str(item.get("issuerName",
-                                   item.get("emittent",
-                                   item.get("issuer", ""))))
+                wkn          = str(item.get("wkn", "")).strip().upper()
+                emittent_raw = str(item.get("issuer", item.get("emittent", ""))).lower()
+                hebel        = _sf(item.get("leverage",
+                                   item.get("leverageFactor",
+                                   item.get("gearing", 0))))
+                expiry_str   = str(item.get("expiryDate",
+                                   item.get("maturityDate",
+                                   item.get("laufzeit", ""))))
 
+                if not _is_gettex_emittent(emittent_raw):
+                    continue
                 if not wkn or len(wkn) < 4:
                     continue
                 if not (3.0 <= hebel <= 8.0):
                     continue
 
-                # Datum kuerzen: "2026-09-18T00:00:00" → "Sep 26"
-                laufzeit = _format_expiry(expiry)
-                emittent = _map_emittent(emittent_raw)
+                # Laufzeit-Check: mind. 90 Tage
+                try:
+                    exp_date = datetime.fromisoformat(expiry_str[:10])
+                    if exp_date < min_expiry:
+                        continue
+                except Exception:
+                    pass  # Datum nicht parsebar, trotzdem nehmen
 
                 return {
                     "wkn":      wkn,
                     "hebel":    str(round(hebel, 1)),
-                    "laufzeit": laufzeit,
-                    "emittent": emittent,
+                    "laufzeit": _format_expiry(expiry_str),
+                    "emittent": _map_emittent(emittent_raw),
                 }
 
             except Exception:
                 continue
 
     except Exception as e:
-        print("  OS-API Fehler: " + str(e))
+        print("  OS onvista Fehler: " + str(e))
 
     return None
 
 
-def _safe_float(val):
-    """Sicheres Float-Parsing fuer API-Werte."""
+def _is_gettex_emittent(raw):
+    """Prueft ob Emittent auf gettex / Finanzen.Zero handelbar ist."""
+    raw = raw.lower()
+    return any(e in raw for e in GETTEX_EMITTENTEN)
+
+
+def _map_emittent(raw):
+    """Kuerzt Emittenten-Namen auf Kurzform."""
+    raw = raw.lower()
+    for key, short in EMITTENT_KURZ.items():
+        if key in raw:
+            return short
+    return raw[:12].title() if raw else "—"
+
+
+def _sf(val):
+    """Safe float — gibt 0.0 bei None/ungueltigem Wert."""
     try:
         if val is None:
             return 0.0
@@ -444,36 +515,26 @@ def _safe_float(val):
         return 0.0
 
 
-def _map_emittent(raw):
-    """Kuerzt Emittenten-Namen."""
-    raw = str(raw)
-    for key, short in EMITTENT_MAP.items():
-        if key.lower() in raw.lower():
-            return short
-    return raw[:10] if raw else "—"
-
-
 def _format_expiry(expiry_str):
-    """Formatiert ISO-Datum zu lesbarem Kurzformat: '2026-09-18' → 'Sep 26'"""
+    """ISO-Datum → lesbares Kurzformat: '2026-09-18' → 'Sep 26'"""
+    months = ["Jan","Feb","Mar","Apr","Mai","Jun",
+              "Jul","Aug","Sep","Okt","Nov","Dez"]
     try:
-        months = ["Jan","Feb","Mär","Apr","Mai","Jun",
-                  "Jul","Aug","Sep","Okt","Nov","Dez"]
-        parts = expiry_str[:10].split("-")
+        parts = str(expiry_str)[:10].split("-")
         if len(parts) == 3:
-            m = int(parts[1]) - 1
-            y = parts[2][-2:]
-            return months[m] + " " + y
+            return months[int(parts[1]) - 1] + " " + parts[2][-2:]
     except Exception:
         pass
-    return expiry_str[:10] if len(expiry_str) >= 10 else expiry_str
+    return str(expiry_str)[:10] if len(str(expiry_str)) >= 10 else str(expiry_str)
 
 
 def _derivate_fallback(slug):
-    """Fallback wenn ISIN fehlt oder API nicht erreichbar."""
+    """Fallback wenn ISIN fehlt oder API komplett nicht erreichbar."""
     return (
-        "🔴 KO Long: hsbc-zertifikate.de → " + slug + " → Turbo Long\n"
+        "🔴 KO Long: hsbc-zertifikate.de → Turbo Long suchen\n"
         "🟡 OS Call: finanzen.net → " + slug + " → Optionsscheine"
     )
+
 
 # ── Positions-Tracking ─────────────────────────────────────────────────────────
 
