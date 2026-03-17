@@ -226,20 +226,49 @@ def analyze_ticker(ticker_symbol):
         print("  Fehler " + ticker_symbol + ": " + str(e))
         return None
 
-# ── AUTO-DERIVATE-SUCHE (NEU in v4) ───────────────────────────────────────────
+# ── AUTO-DERIVATE-SUCHE via Boerse Frankfurt JSON-API (v4.1) ──────────────────
+#
+# finanzen.net laed Tabellen via JavaScript → BeautifulSoup sieht leeren HTML.
+# Loesung: Boerse Frankfurt REST-API gibt echtes JSON zurueck.
+# Endpoint: https://api.boerse-frankfurt.de/v1/search/derivatives
+# Keine Authentifizierung noetig, stabil und schnell.
+
+BF_API   = "https://api.boerse-frankfurt.de/v1/search/derivatives"
+BF_HEADS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0",
+    "Accept":     "application/json",
+    "Origin":     "https://www.boerse-frankfurt.de",
+    "Referer":    "https://www.boerse-frankfurt.de/",
+}
+
+EMITTENT_MAP = {
+    "HSBC":         "HSBC",
+    "Goldman":      "Goldman",
+    "GS":           "Goldman",
+    "Morgan":       "MS",
+    "Vontobel":     "Vontobel",
+    "UBS":          "UBS",
+    "HVB":          "HVB",
+    "Citi":         "Citi",
+    "BNP":          "BNP",
+    "Société":      "SocGen",
+    "DZ":           "DZ Bank",
+}
+
 
 def fetch_derivate(ticker, info, entry_price):
     """
-    Sucht automatisch KO-Scheine + Optionsscheine auf finanzen.net.
-    Filtert: Hebel 3-6x, KO-Schwelle >8% unter Entry.
-    Gibt formatierten Text-Block zurueck fuer Telegram-Signal.
+    Hauptfunktion: holt KO-Scheine + Optionsscheine via Boerse Frankfurt API.
+    Filtert: Hebel 3-6x (KO) / 3-8x (OS), KO-Schwelle >8% unter Entry.
     """
-    if not BS4_AVAILABLE:
-        slug = info.get("slug", ticker.lower().replace(".de",""))
-        return _derivate_fallback(ticker, slug)
+    isin = info.get("isin", "")
+    slug = info.get("slug", ticker.lower().replace(".de", ""))
 
-    ko_results = _fetch_knockouts(ticker, info, entry_price)
-    os_result  = _fetch_optionsschein(ticker, info, entry_price)
+    if not isin:
+        return _derivate_fallback(slug)
+
+    ko_results = _fetch_ko_api(isin, entry_price)
+    os_result  = _fetch_os_api(isin, entry_price)
 
     lines = []
 
@@ -247,233 +276,200 @@ def fetch_derivate(ticker, info, entry_price):
         lines.append("🔴 <b>Knock-Out Long:</b>")
         for ko in ko_results[:2]:
             lines.append(
-                "  • <code>" + ko["wkn"] + "</code>"
-                + " | " + ko.get("emittent", "")
+                "  • WKN <code>" + ko["wkn"] + "</code>"
+                + " | " + ko.get("emittent", "—")
                 + " | Hebel " + ko.get("hebel", "?") + "x"
-                + " | KO " + ko.get("barrier", "?")
+                + " | KO-Lvl " + ko.get("barrier", "?")
             )
     else:
-        slug = info.get("slug", ticker.lower().replace(".de",""))
-        lines.append("🔴 KO Long: hsbc-zertifikate.de → " + slug)
+        lines.append("🔴 KO Long: hsbc-zertifikate.de → " + slug + " → Turbo Long")
 
     if os_result:
         lines.append("🟡 <b>Optionsschein Call:</b>")
         lines.append(
-            "  • <code>" + os_result["wkn"] + "</code>"
-            + " | " + os_result.get("emittent", "")
+            "  • WKN <code>" + os_result["wkn"] + "</code>"
+            + " | " + os_result.get("emittent", "—")
             + " | Hebel " + os_result.get("hebel", "?") + "x"
             + " | Laufzeit " + os_result.get("laufzeit", "?")
         )
     else:
-        slug = info.get("slug", ticker.lower().replace(".de",""))
         lines.append("🟡 OS Call: finanzen.net → " + slug + " → Optionsscheine")
 
     return "\n".join(lines)
 
 
-def _fetch_knockouts(ticker, info, entry_price):
-    """Scrapt finanzen.net Knockout-Seite und filtert passende KOs."""
-    results = []
-    slug    = info.get("slug", ticker.lower().replace(".de",""))
-    url     = "https://www.finanzen.net/hebelprodukte/knockouts/" + slug + "-aktie/call"
+def _fetch_ko_api(isin, entry_price):
+    """Holt Knock-Out Calls via Boerse Frankfurt API."""
+    results        = []
+    ko_max_barrier = entry_price * 0.92  # KO mind. 8% unter Entry
+
+    params = {
+        "underlyingIsin": isin,
+        "productType":    "KNOCK_OUT",
+        "callPut":        "CALL",
+        "leverageFrom":   "3",
+        "leverageTo":     "6",
+        "pageSize":       "30",
+        "pageNumber":     "1",
+        "sortField":      "leverage",
+        "sortOrder":      "asc",
+    }
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=12)
+        resp = requests.get(BF_API, params=params, headers=BF_HEADS, timeout=12)
         if resp.status_code != 200:
-            print("  KO-Fetch: HTTP " + str(resp.status_code) + " fuer " + ticker)
+            print("  KO-API: HTTP " + str(resp.status_code))
             return []
 
-        soup  = BeautifulSoup(resp.text, "html.parser")
-        table = soup.find("table", {"id": re.compile(r"knockout", re.I)})
-        if not table:
-            # Fallback: erstes groesseres Table
-            tables = soup.find_all("table")
-            table  = max(tables, key=lambda t: len(t.find_all("tr")), default=None) if tables else None
+        data  = resp.json()
+        items = data.get("data", data.get("derivatives", data.get("items", [])))
 
-        if not table:
-            print("  KO-Fetch: Keine Tabelle gefunden fuer " + ticker)
-            return []
+        if not items and isinstance(data, list):
+            items = data
 
-        rows = table.find_all("tr")[1:]  # Header ueberspringen
-        ko_min_barrier = entry_price * 0.92   # min 8% Abstand
+        print("  KO-API: " + str(len(items)) + " Treffer fuer ISIN " + isin)
 
-        for row in rows:
-            cols = row.find_all("td")
-            if len(cols) < 5:
-                continue
+        for item in items:
             try:
-                texts = [c.get_text(strip=True) for c in cols]
+                wkn     = str(item.get("wkn", item.get("WKN", ""))).strip()
+                barrier = _safe_float(item.get("knockOutBarrier",
+                           item.get("barrier",
+                           item.get("knockoutLevel", 0))))
+                hebel   = _safe_float(item.get("leverage",
+                           item.get("leverageFactor",
+                           item.get("hebel", 0))))
+                emittent_raw = str(item.get("issuerName",
+                                   item.get("emittent",
+                                   item.get("issuer", ""))))
 
-                # WKN extrahieren (oft 6-stellig alphanumerisch)
-                wkn = ""
-                for t in texts:
-                    m = re.search(r"\b([A-Z0-9]{6})\b", t)
-                    if m:
-                        wkn = m.group(1)
-                        break
-
-                if not wkn:
+                if not wkn or len(wkn) < 4:
                     continue
-
-                # Hebel und Barriere parsen
-                hebel   = _parse_number(texts, ["Hebel", "Leverage", "Faktor"])
-                barrier = _parse_number(texts, ["KO", "Knock", "Barriere", "Basis"])
-
-                if hebel is None or barrier is None:
-                    # Fallback: nach Zahlenmustern suchen
-                    nums = [_try_float(t) for t in texts if _try_float(t) is not None]
-                    nums = [n for n in nums if n > 0]
-                    if len(nums) >= 2:
-                        barrier = min(nums)
-                        hebel   = max(nums)
-
-                if hebel is None or barrier is None:
+                if barrier <= 0 or barrier >= ko_max_barrier:
                     continue
-
-                # Filter anwenden
                 if not (3.0 <= hebel <= 6.0):
                     continue
-                if barrier >= ko_min_barrier:  # KO zu nah am Kurs
-                    continue
 
-                # Emittent
-                emittent = ""
-                for t in texts:
-                    for e in ["HSBC","Goldman","Morgan","Vontobel","UBS","HVB","Citi"]:
-                        if e.lower() in t.lower():
-                            emittent = e
-                            break
-                    if emittent:
-                        break
+                emittent = _map_emittent(emittent_raw)
 
                 results.append({
                     "wkn":      wkn,
                     "hebel":    str(round(hebel, 1)),
                     "barrier":  str(round(barrier, 2)),
-                    "emittent": emittent or "—",
+                    "emittent": emittent,
                 })
 
-                if len(results) >= 3:
+                if len(results) >= 2:
                     break
 
             except Exception:
                 continue
 
-        print("  KO-Fetch: " + str(len(results)) + " KOs gefunden fuer " + ticker)
-
     except Exception as e:
-        print("  KO-Fetch Fehler " + ticker + ": " + str(e))
+        print("  KO-API Fehler: " + str(e))
 
     return results
 
 
-def _fetch_optionsschein(ticker, info, entry_price):
-    """Scrapt finanzen.net Optionsschein-Seite fuer einen passenden Call."""
-    slug = info.get("slug", ticker.lower().replace(".de",""))
-    url  = "https://www.finanzen.net/optionsscheine/" + slug + "-aktie/call"
+def _fetch_os_api(isin, entry_price):
+    """Holt Optionsschein Call via Boerse Frankfurt API."""
+    params = {
+        "underlyingIsin": isin,
+        "productType":    "WARRANT",
+        "callPut":        "CALL",
+        "leverageFrom":   "3",
+        "leverageTo":     "8",
+        "pageSize":       "20",
+        "pageNumber":     "1",
+        "sortField":      "leverage",
+        "sortOrder":      "asc",
+    }
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=12)
+        resp = requests.get(BF_API, params=params, headers=BF_HEADS, timeout=12)
         if resp.status_code != 200:
             return None
 
-        soup   = BeautifulSoup(resp.text, "html.parser")
-        tables = soup.find_all("table")
-        table  = max(tables, key=lambda t: len(t.find_all("tr")), default=None) if tables else None
+        data  = resp.json()
+        items = data.get("data", data.get("derivatives", data.get("items", [])))
+        if not items and isinstance(data, list):
+            items = data
 
-        if not table:
-            return None
+        print("  OS-API: " + str(len(items)) + " Treffer")
 
-        rows = table.find_all("tr")[1:]
-
-        for row in rows:
-            cols  = row.find_all("td")
-            if len(cols) < 5:
-                continue
+        for item in items:
             try:
-                texts = [c.get_text(strip=True) for c in cols]
+                wkn     = str(item.get("wkn", item.get("WKN", ""))).strip()
+                hebel   = _safe_float(item.get("leverage",
+                           item.get("leverageFactor",
+                           item.get("hebel", 0))))
+                expiry  = str(item.get("expiryDate",
+                              item.get("maturityDate",
+                              item.get("laufzeit", "?"))))
+                emittent_raw = str(item.get("issuerName",
+                                   item.get("emittent",
+                                   item.get("issuer", ""))))
 
-                wkn = ""
-                for t in texts:
-                    m = re.search(r"\b([A-Z0-9]{6})\b", t)
-                    if m:
-                        wkn = m.group(1)
-                        break
-                if not wkn:
+                if not wkn or len(wkn) < 4:
+                    continue
+                if not (3.0 <= hebel <= 8.0):
                     continue
 
-                hebel = _parse_number(texts, ["Hebel","Leverage"])
-                if hebel is None:
-                    nums  = [_try_float(t) for t in texts if _try_float(t) is not None]
-                    nums  = [n for n in nums if 3 <= n <= 8]
-                    hebel = nums[0] if nums else None
-
-                if hebel is None or not (3.0 <= hebel <= 8.0):
-                    continue
-
-                # Laufzeit suchen (z.B. "Jun 2026" oder "12/2026")
-                laufzeit = ""
-                for t in texts:
-                    m = re.search(r"(\d{1,2}[./]\d{2,4}|[A-Z][a-z]{2}\s?\d{2,4})", t)
-                    if m:
-                        laufzeit = m.group(1)
-                        break
-
-                emittent = ""
-                for t in texts:
-                    for e in ["HSBC","Goldman","Morgan","Vontobel","UBS","HVB","Citi"]:
-                        if e.lower() in t.lower():
-                            emittent = e
-                            break
-                    if emittent:
-                        break
+                # Datum kuerzen: "2026-09-18T00:00:00" → "Sep 26"
+                laufzeit = _format_expiry(expiry)
+                emittent = _map_emittent(emittent_raw)
 
                 return {
                     "wkn":      wkn,
                     "hebel":    str(round(hebel, 1)),
-                    "laufzeit": laufzeit or "?",
-                    "emittent": emittent or "—",
+                    "laufzeit": laufzeit,
+                    "emittent": emittent,
                 }
 
             except Exception:
                 continue
 
     except Exception as e:
-        print("  OS-Fetch Fehler " + ticker + ": " + str(e))
+        print("  OS-API Fehler: " + str(e))
 
     return None
 
 
-def _parse_number(texts, keywords):
-    """Sucht nach Keyword in texts und gibt die naechste Zahl zurueck."""
-    for i, t in enumerate(texts):
-        for kw in keywords:
-            if kw.lower() in t.lower():
-                n = _try_float(t)
-                if n is not None:
-                    return n
-                # Naechste Zelle pruefen
-                if i + 1 < len(texts):
-                    n = _try_float(texts[i + 1])
-                    if n is not None:
-                        return n
-    return None
-
-
-def _try_float(s):
-    """Versucht String in Float umzuwandeln (DE-Format: . als Tausender, , als Dezimal)."""
+def _safe_float(val):
+    """Sicheres Float-Parsing fuer API-Werte."""
     try:
-        cleaned = s.replace(".", "").replace(",", ".").strip()
-        cleaned = re.sub(r"[^\d.]", "", cleaned)
-        if cleaned:
-            return float(cleaned)
+        if val is None:
+            return 0.0
+        return float(str(val).replace(",", ".").strip())
+    except Exception:
+        return 0.0
+
+
+def _map_emittent(raw):
+    """Kuerzt Emittenten-Namen."""
+    raw = str(raw)
+    for key, short in EMITTENT_MAP.items():
+        if key.lower() in raw.lower():
+            return short
+    return raw[:10] if raw else "—"
+
+
+def _format_expiry(expiry_str):
+    """Formatiert ISO-Datum zu lesbarem Kurzformat: '2026-09-18' → 'Sep 26'"""
+    try:
+        months = ["Jan","Feb","Mär","Apr","Mai","Jun",
+                  "Jul","Aug","Sep","Okt","Nov","Dez"]
+        parts = expiry_str[:10].split("-")
+        if len(parts) == 3:
+            m = int(parts[1]) - 1
+            y = parts[2][-2:]
+            return months[m] + " " + y
     except Exception:
         pass
-    return None
+    return expiry_str[:10] if len(expiry_str) >= 10 else expiry_str
 
 
-def _derivate_fallback(ticker, slug):
-    """Fallback wenn BS4 nicht verfuegbar."""
+def _derivate_fallback(slug):
+    """Fallback wenn ISIN fehlt oder API nicht erreichbar."""
     return (
         "🔴 KO Long: hsbc-zertifikate.de → " + slug + " → Turbo Long\n"
         "🟡 OS Call: finanzen.net → " + slug + " → Optionsscheine"
@@ -697,7 +693,6 @@ def scan_megatrend_universe():
 # ── Claude Analyse ─────────────────────────────────────────────────────────────
 
 def get_claude_signal(ticker, analysis, info):
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     checks = " | ".join([k + ": " + v for k, v in analysis["checks"].items()])
     prompt = (
         "Erfahrener Trading-Analyst. Kurzes Signal fuer Telegram (max 180 Woerter):\n\n"
@@ -715,9 +710,33 @@ def get_claude_signal(ticker, analysis, info):
         + "Megatrend: " + info.get("megatrend", "-") + "\n\n"
         + "Format: 1) Empfehlung 2) Begruendung (2 Saetze) 3) Levels 4) Megatrend. Emojis nutzen."
     )
-    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=400,
-                                messages=[{"role": "user", "content": prompt}])
-    return r.content[0].text
+    # Retry-Logik: 2 Versuche mit je 25s Timeout
+    for attempt in range(2):
+        try:
+            client = anthropic.Anthropic(
+                api_key=os.environ["ANTHROPIC_API_KEY"],
+                timeout=25.0,
+            )
+            r = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=400,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return r.content[0].text
+        except Exception as e:
+            print("  Claude-Signal Versuch " + str(attempt+1) + " Fehler: " + str(e))
+            if attempt == 0:
+                import time; time.sleep(3)
+    # Fallback: kompakte Analyse ohne Claude
+    return (
+        "📊 <b>Setup:</b> " + ticker + " Score " + str(analysis["score"]) + "/8\n"
+        + "📈 Trend: EMA-Faecher "
+        + ("✅" if "OK" in analysis["checks"].get("EMA-Faecher","") else "❌")
+        + " | RSI " + str(round(analysis["rsi"],1))
+        + " | MACD "
+        + ("✅" if "OK" in analysis["checks"].get("MACD","") else "❌") + "\n"
+        + "💡 Megatrend: " + info.get("megatrend", "-")
+    )
 
 def get_claude_tagesbericht(top_results, markt_info):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
