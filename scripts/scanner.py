@@ -1,9 +1,10 @@
 """
-Trading Signal Scanner v3 - Exit-Signale + TSL-Tracking
-Neu: TSL-Alarm, TP1/TP2-Alarm, Technischer Ausstieg, Positions-Tracking
+Trading Signal Scanner v4 - Auto-Derivate-Suche
+Neu: Automatische KO-Schein + Optionsschein Suche via finanzen.net bei jedem Signal
 """
 
 import os
+import re
 import json
 import requests
 from datetime import datetime, timedelta
@@ -11,36 +12,53 @@ import yfinance as yf
 import pandas as pd
 import anthropic
 
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
+
 # ── Konfiguration ──────────────────────────────────────────────────────────────
 
 MIN_SCORE       = 6
 TOP_N           = 5
 ANTI_SPAM_HOURS = 6
-TSL_TRIGGER_PCT = 0.035   # TSL-Alarm ab 3.5% Rückgang vom Hochpunkt
-TP_TOLERANCE    = 0.005   # TP gilt als erreicht bei 0.5% Abstand
+TSL_TRIGGER_PCT = 0.035
+TP_TOLERANCE    = 0.005
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "de-DE,de;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 # ── Kern-Watchlist ─────────────────────────────────────────────────────────────
 
 WATCHLIST = {
-    "NVDA":   {"name": "NVIDIA",         "wkn": "918422",  "megatrend": "AI & Halbleiter", "market": "US"},
-    "ASML":   {"name": "ASML Holding",   "wkn": "A1J4U4",  "megatrend": "AI & Halbleiter", "market": "US"},
-    "AVGO":   {"name": "Broadcom",       "wkn": "A2JG9Z",  "megatrend": "AI & Halbleiter", "market": "US"},
-    "AMD":    {"name": "AMD",            "wkn": "A2N6GH",  "megatrend": "AI & Halbleiter", "market": "US"},
-    "MSFT":   {"name": "Microsoft",      "wkn": "870747",  "megatrend": "AI & Halbleiter", "market": "US"},
-    "XOM":    {"name": "ExxonMobil",     "wkn": "852549",  "megatrend": "Energie",         "market": "US"},
-    "SLB":    {"name": "SLB",            "wkn": "853390",  "megatrend": "Energie",         "market": "US"},
-    "NEE":    {"name": "NextEra Energy", "wkn": "A0NH8V",  "megatrend": "Energie",         "market": "US"},
-    "NVO":    {"name": "Novo Nordisk",   "wkn": "A1XA8R",  "megatrend": "Healthcare GLP-1","market": "US"},
-    "LLY":    {"name": "Eli Lilly",      "wkn": "858560",  "megatrend": "Healthcare GLP-1","market": "US"},
-    "PM":     {"name": "Philip Morris",  "wkn": "A14TQH",  "megatrend": "Defensiv",        "market": "US"},
-    "GLD":    {"name": "Gold ETF",       "wkn": "A0LP78",  "megatrend": "Gold Hedge",      "market": "ETF"},
-    "GDX":    {"name": "Gold Miner ETF", "wkn": "A0Q8NB",  "megatrend": "Gold Hedge",      "market": "ETF"},
-    "RHM.DE": {"name": "Rheinmetall",    "wkn": "703000",  "megatrend": "Ruestung Europa", "market": "DAX"},
-    "SIE.DE": {"name": "Siemens",        "wkn": "723610",  "megatrend": "Infrastruktur",   "market": "DAX"},
-    "ZAL.DE": {"name": "Zalando",        "wkn": "ZAL111",  "megatrend": "E-Commerce",      "market": "DAX"},
-    "SAP.DE": {"name": "SAP",            "wkn": "716460",  "megatrend": "AI & Halbleiter", "market": "DAX"},
-    "SPY":    {"name": "S&P 500 ETF",    "wkn": "A0AET0",  "megatrend": "Index",           "market": "ETF"},
-    "QQQ":    {"name": "Nasdaq 100 ETF", "wkn": "A0AET7",  "megatrend": "Index",           "market": "ETF"},
+    "NVDA":   {"name": "NVIDIA",           "wkn": "918422",  "isin": "US67066G1040", "slug": "nvidia",           "megatrend": "AI & Halbleiter", "market": "US"},
+    "ASML":   {"name": "ASML Holding",     "wkn": "A1J4U4",  "isin": "NL0010273215", "slug": "asml-holding",     "megatrend": "AI & Halbleiter", "market": "US"},
+    "AVGO":   {"name": "Broadcom",         "wkn": "A2JG9Z",  "isin": "US11135F1012", "slug": "broadcom",         "megatrend": "AI & Halbleiter", "market": "US"},
+    "AMD":    {"name": "AMD",              "wkn": "A2N6GH",  "isin": "US0079031078", "slug": "advanced-micro-devices", "megatrend": "AI & Halbleiter", "market": "US"},
+    "MSFT":   {"name": "Microsoft",        "wkn": "870747",  "isin": "US5949181045", "slug": "microsoft",        "megatrend": "AI & Halbleiter", "market": "US"},
+    "XOM":    {"name": "ExxonMobil",       "wkn": "852549",  "isin": "US30231G1022", "slug": "exxon-mobil",      "megatrend": "Energie",         "market": "US"},
+    "SLB":    {"name": "SLB",              "wkn": "853390",  "isin": "AN8068571086", "slug": "schlumberger",     "megatrend": "Energie",         "market": "US"},
+    "NEE":    {"name": "NextEra Energy",   "wkn": "A0NH8V",  "isin": "US65339F1012", "slug": "nextera-energy",   "megatrend": "Energie",         "market": "US"},
+    "NVO":    {"name": "Novo Nordisk",     "wkn": "A1XA8R",  "isin": "US6701002056", "slug": "novo-nordisk",     "megatrend": "Healthcare GLP-1","market": "US"},
+    "LLY":    {"name": "Eli Lilly",        "wkn": "858560",  "isin": "US5324571083", "slug": "eli-lilly",        "megatrend": "Healthcare GLP-1","market": "US"},
+    "PM":     {"name": "Philip Morris",    "wkn": "A14TQH",  "isin": "US7181721090", "slug": "philip-morris-international", "megatrend": "Defensiv", "market": "US"},
+    "GD":     {"name": "General Dynamics", "wkn": "851143",  "isin": "US3695501086", "slug": "general-dynamics", "megatrend": "Ruestung",        "market": "US"},
+    "GLD":    {"name": "Gold ETF",         "wkn": "A0LP78",  "isin": "US78463V1070", "slug": "spdr-gold-shares", "megatrend": "Gold Hedge",      "market": "ETF"},
+    "GDX":    {"name": "Gold Miner ETF",   "wkn": "A0Q8NB",  "isin": "US92189F1066", "slug": "vaneck-vectors-gold-miners", "megatrend": "Gold Hedge", "market": "ETF"},
+    "RHM.DE": {"name": "Rheinmetall",      "wkn": "703000",  "isin": "DE0007030009", "slug": "rheinmetall",      "megatrend": "Ruestung Europa", "market": "DAX"},
+    "SIE.DE": {"name": "Siemens",          "wkn": "723610",  "isin": "DE0007236101", "slug": "siemens",          "megatrend": "Infrastruktur",   "market": "DAX"},
+    "ZAL.DE": {"name": "Zalando",          "wkn": "ZAL111",  "isin": "DE000ZAL1111", "slug": "zalando",          "megatrend": "E-Commerce",      "market": "DAX"},
+    "SAP.DE": {"name": "SAP",              "wkn": "716460",  "isin": "DE0007164600", "slug": "sap",              "megatrend": "AI & Halbleiter", "market": "DAX"},
+    "SPY":    {"name": "S&P 500 ETF",      "wkn": "A0AET0",  "isin": "US78462F1030", "slug": "spdr-sp-500",      "megatrend": "Index",           "market": "ETF"},
+    "QQQ":    {"name": "Nasdaq 100 ETF",   "wkn": "A0AET7",  "isin": "US46090E1038", "slug": "invesco-qqq-trust","megatrend": "Index",           "market": "ETF"},
 }
 
 # ── Megatrend-Universen ────────────────────────────────────────────────────────
@@ -208,6 +226,259 @@ def analyze_ticker(ticker_symbol):
         print("  Fehler " + ticker_symbol + ": " + str(e))
         return None
 
+# ── AUTO-DERIVATE-SUCHE (NEU in v4) ───────────────────────────────────────────
+
+def fetch_derivate(ticker, info, entry_price):
+    """
+    Sucht automatisch KO-Scheine + Optionsscheine auf finanzen.net.
+    Filtert: Hebel 3-6x, KO-Schwelle >8% unter Entry.
+    Gibt formatierten Text-Block zurueck fuer Telegram-Signal.
+    """
+    if not BS4_AVAILABLE:
+        slug = info.get("slug", ticker.lower().replace(".de",""))
+        return _derivate_fallback(ticker, slug)
+
+    ko_results = _fetch_knockouts(ticker, info, entry_price)
+    os_result  = _fetch_optionsschein(ticker, info, entry_price)
+
+    lines = []
+
+    if ko_results:
+        lines.append("🔴 <b>Knock-Out Long:</b>")
+        for ko in ko_results[:2]:
+            lines.append(
+                "  • <code>" + ko["wkn"] + "</code>"
+                + " | " + ko.get("emittent", "")
+                + " | Hebel " + ko.get("hebel", "?") + "x"
+                + " | KO " + ko.get("barrier", "?")
+            )
+    else:
+        slug = info.get("slug", ticker.lower().replace(".de",""))
+        lines.append("🔴 KO Long: hsbc-zertifikate.de → " + slug)
+
+    if os_result:
+        lines.append("🟡 <b>Optionsschein Call:</b>")
+        lines.append(
+            "  • <code>" + os_result["wkn"] + "</code>"
+            + " | " + os_result.get("emittent", "")
+            + " | Hebel " + os_result.get("hebel", "?") + "x"
+            + " | Laufzeit " + os_result.get("laufzeit", "?")
+        )
+    else:
+        slug = info.get("slug", ticker.lower().replace(".de",""))
+        lines.append("🟡 OS Call: finanzen.net → " + slug + " → Optionsscheine")
+
+    return "\n".join(lines)
+
+
+def _fetch_knockouts(ticker, info, entry_price):
+    """Scrapt finanzen.net Knockout-Seite und filtert passende KOs."""
+    results = []
+    slug    = info.get("slug", ticker.lower().replace(".de",""))
+    url     = "https://www.finanzen.net/hebelprodukte/knockouts/" + slug + "-aktie/call"
+
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=12)
+        if resp.status_code != 200:
+            print("  KO-Fetch: HTTP " + str(resp.status_code) + " fuer " + ticker)
+            return []
+
+        soup  = BeautifulSoup(resp.text, "html.parser")
+        table = soup.find("table", {"id": re.compile(r"knockout", re.I)})
+        if not table:
+            # Fallback: erstes groesseres Table
+            tables = soup.find_all("table")
+            table  = max(tables, key=lambda t: len(t.find_all("tr")), default=None) if tables else None
+
+        if not table:
+            print("  KO-Fetch: Keine Tabelle gefunden fuer " + ticker)
+            return []
+
+        rows = table.find_all("tr")[1:]  # Header ueberspringen
+        ko_min_barrier = entry_price * 0.92   # min 8% Abstand
+
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) < 5:
+                continue
+            try:
+                texts = [c.get_text(strip=True) for c in cols]
+
+                # WKN extrahieren (oft 6-stellig alphanumerisch)
+                wkn = ""
+                for t in texts:
+                    m = re.search(r"\b([A-Z0-9]{6})\b", t)
+                    if m:
+                        wkn = m.group(1)
+                        break
+
+                if not wkn:
+                    continue
+
+                # Hebel und Barriere parsen
+                hebel   = _parse_number(texts, ["Hebel", "Leverage", "Faktor"])
+                barrier = _parse_number(texts, ["KO", "Knock", "Barriere", "Basis"])
+
+                if hebel is None or barrier is None:
+                    # Fallback: nach Zahlenmustern suchen
+                    nums = [_try_float(t) for t in texts if _try_float(t) is not None]
+                    nums = [n for n in nums if n > 0]
+                    if len(nums) >= 2:
+                        barrier = min(nums)
+                        hebel   = max(nums)
+
+                if hebel is None or barrier is None:
+                    continue
+
+                # Filter anwenden
+                if not (3.0 <= hebel <= 6.0):
+                    continue
+                if barrier >= ko_min_barrier:  # KO zu nah am Kurs
+                    continue
+
+                # Emittent
+                emittent = ""
+                for t in texts:
+                    for e in ["HSBC","Goldman","Morgan","Vontobel","UBS","HVB","Citi"]:
+                        if e.lower() in t.lower():
+                            emittent = e
+                            break
+                    if emittent:
+                        break
+
+                results.append({
+                    "wkn":      wkn,
+                    "hebel":    str(round(hebel, 1)),
+                    "barrier":  str(round(barrier, 2)),
+                    "emittent": emittent or "—",
+                })
+
+                if len(results) >= 3:
+                    break
+
+            except Exception:
+                continue
+
+        print("  KO-Fetch: " + str(len(results)) + " KOs gefunden fuer " + ticker)
+
+    except Exception as e:
+        print("  KO-Fetch Fehler " + ticker + ": " + str(e))
+
+    return results
+
+
+def _fetch_optionsschein(ticker, info, entry_price):
+    """Scrapt finanzen.net Optionsschein-Seite fuer einen passenden Call."""
+    slug = info.get("slug", ticker.lower().replace(".de",""))
+    url  = "https://www.finanzen.net/optionsscheine/" + slug + "-aktie/call"
+
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=12)
+        if resp.status_code != 200:
+            return None
+
+        soup   = BeautifulSoup(resp.text, "html.parser")
+        tables = soup.find_all("table")
+        table  = max(tables, key=lambda t: len(t.find_all("tr")), default=None) if tables else None
+
+        if not table:
+            return None
+
+        rows = table.find_all("tr")[1:]
+
+        for row in rows:
+            cols  = row.find_all("td")
+            if len(cols) < 5:
+                continue
+            try:
+                texts = [c.get_text(strip=True) for c in cols]
+
+                wkn = ""
+                for t in texts:
+                    m = re.search(r"\b([A-Z0-9]{6})\b", t)
+                    if m:
+                        wkn = m.group(1)
+                        break
+                if not wkn:
+                    continue
+
+                hebel = _parse_number(texts, ["Hebel","Leverage"])
+                if hebel is None:
+                    nums  = [_try_float(t) for t in texts if _try_float(t) is not None]
+                    nums  = [n for n in nums if 3 <= n <= 8]
+                    hebel = nums[0] if nums else None
+
+                if hebel is None or not (3.0 <= hebel <= 8.0):
+                    continue
+
+                # Laufzeit suchen (z.B. "Jun 2026" oder "12/2026")
+                laufzeit = ""
+                for t in texts:
+                    m = re.search(r"(\d{1,2}[./]\d{2,4}|[A-Z][a-z]{2}\s?\d{2,4})", t)
+                    if m:
+                        laufzeit = m.group(1)
+                        break
+
+                emittent = ""
+                for t in texts:
+                    for e in ["HSBC","Goldman","Morgan","Vontobel","UBS","HVB","Citi"]:
+                        if e.lower() in t.lower():
+                            emittent = e
+                            break
+                    if emittent:
+                        break
+
+                return {
+                    "wkn":      wkn,
+                    "hebel":    str(round(hebel, 1)),
+                    "laufzeit": laufzeit or "?",
+                    "emittent": emittent or "—",
+                }
+
+            except Exception:
+                continue
+
+    except Exception as e:
+        print("  OS-Fetch Fehler " + ticker + ": " + str(e))
+
+    return None
+
+
+def _parse_number(texts, keywords):
+    """Sucht nach Keyword in texts und gibt die naechste Zahl zurueck."""
+    for i, t in enumerate(texts):
+        for kw in keywords:
+            if kw.lower() in t.lower():
+                n = _try_float(t)
+                if n is not None:
+                    return n
+                # Naechste Zelle pruefen
+                if i + 1 < len(texts):
+                    n = _try_float(texts[i + 1])
+                    if n is not None:
+                        return n
+    return None
+
+
+def _try_float(s):
+    """Versucht String in Float umzuwandeln (DE-Format: . als Tausender, , als Dezimal)."""
+    try:
+        cleaned = s.replace(".", "").replace(",", ".").strip()
+        cleaned = re.sub(r"[^\d.]", "", cleaned)
+        if cleaned:
+            return float(cleaned)
+    except Exception:
+        pass
+    return None
+
+
+def _derivate_fallback(ticker, slug):
+    """Fallback wenn BS4 nicht verfuegbar."""
+    return (
+        "🔴 KO Long: hsbc-zertifikate.de → " + slug + " → Turbo Long\n"
+        "🟡 OS Call: finanzen.net → " + slug + " → Optionsscheine"
+    )
+
 # ── Positions-Tracking ─────────────────────────────────────────────────────────
 
 def load_state():
@@ -282,90 +553,111 @@ def check_exit_signals(state):
                   " | PnL " + str(pnl_pct) + "%" +
                   " | Hoch " + str(round(new_high,2)))
 
-            # Stop-Loss getroffen
             if c <= stop:
                 loss = round(((c - entry) / entry) * 100, 1)
                 msg = (
-                    "STOP-LOSS GETROFFEN - " + ticker + "\n"
+                    "⛔ <b>STOP-LOSS - " + ticker + "</b>\n"
                     "Kurs: " + str(round(c,2)) + " | Stop: " + str(stop) + "\n"
                     "Verlust: " + str(loss) + "%\n"
-                    "--------------------------------\n"
-                    "Aktion: Position SOFORT schliessen!\n"
-                    "Stop-Loss wurde unterschritten."
+                    "────────────────────\n"
+                    "🚨 <b>Sofortmassnahme Finanzen.Zero:</b>\n"
+                    "1. Depot oeffnen → " + ticker + "\n"
+                    "2. KO/OS → Verkaufen → Market Order\n"
+                    "3. Aktie (falls gehalten) → Stop-Loss hat ausgeloest\n"
+                    "────────────────────\n"
+                    "⚠️ Kein Anlageberater!"
                 )
                 exit_messages.append(msg)
                 to_close.append((ticker, "Stop-Loss"))
 
-            # TP2 erreicht
             elif c >= tp2 * (1 - TP_TOLERANCE):
                 msg = (
-                    "TP2 ERREICHT - " + ticker + "\n"
+                    "🎯 <b>TP2 ERREICHT - " + ticker + "</b>\n"
                     "Kurs: " + str(round(c,2)) + " | TP2: " + str(tp2) + "\n"
-                    "Gesamtgewinn: +" + str(pnl_pct) + "%\n"
-                    "--------------------------------\n"
-                    "Aktion: Restposition vollstaendig schliessen!\n"
-                    "Maximales Ziel erreicht."
+                    "Gewinn: +" + str(pnl_pct) + "%\n"
+                    "────────────────────\n"
+                    "✅ <b>Aktion Finanzen.Zero:</b>\n"
+                    "1. Restposition KO/OS vollstaendig verkaufen\n"
+                    "2. Limit-Order bei " + str(tp2) + " oder Market\n"
+                    "3. Maximales Ziel erreicht — Trade abgeschlossen!\n"
+                    "────────────────────\n"
+                    "⚠️ Kein Anlageberater!"
                 )
                 exit_messages.append(msg)
                 to_close.append((ticker, "TP2"))
 
-            # TP1 erreicht (nur einmal)
             elif c >= tp1 * (1 - TP_TOLERANCE) and not tp1_hit:
                 state["positions"][ticker]["tp1_hit"] = True
+                new_tsl_level = round(entry * (1 - tsl_pct), 2)
                 msg = (
-                    "TP1 ERREICHT - " + ticker + "\n"
+                    "✅ <b>TP1 ERREICHT - " + ticker + "</b>\n"
                     "Kurs: " + str(round(c,2)) + " | TP1: " + str(tp1) + "\n"
                     "Gewinn: +" + str(pnl_pct) + "%\n"
-                    "--------------------------------\n"
-                    "Aktion: 50% der Position schliessen!\n"
-                    "TSL auf Break-Even " + str(entry) + " nachziehen.\n"
-                    "Rest laeuft weiter bis TP2: " + str(tp2)
+                    "────────────────────\n"
+                    "📋 <b>Aktion Finanzen.Zero:</b>\n"
+                    "1. 50% des KO/OS verkaufen → Limit " + str(tp1) + "\n"
+                    "2. TSL anpassen auf Break-Even:\n"
+                    "   Order → TSL aendern → neuer Abstand\n"
+                    "   sodass Stop bei Entry <b>" + str(entry) + "</b> liegt\n"
+                    "3. Rest laeuft bis TP2: " + str(tp2) + "\n"
+                    "────────────────────\n"
+                    "⚠️ Kein Anlageberater!"
                 )
                 exit_messages.append(msg)
 
-            # TSL mit Gewinn
             elif c <= tsl_lvl and c >= entry:
                 profit = round(((c - entry) / entry) * 100, 1)
                 msg = (
-                    "TSL MIT GEWINN - " + ticker + "\n"
+                    "🔒 <b>TSL MIT GEWINN - " + ticker + "</b>\n"
                     "Kurs: " + str(round(c,2)) + " | TSL-Level: " + str(tsl_lvl) + "\n"
                     "Gewinn gesichert: +" + str(profit) + "%\n"
-                    "--------------------------------\n"
-                    "Aktion: Trailing Stop hat Gewinn gesichert.\n"
-                    "Position schliessen."
+                    "────────────────────\n"
+                    "📋 <b>Aktion Finanzen.Zero:</b>\n"
+                    "1. Trailing Stop hat automatisch ausgeloest\n"
+                    "2. Position sollte bereits geschlossen sein\n"
+                    "3. Falls nicht: KO/OS manuell verkaufen\n"
+                    "────────────────────\n"
+                    "⚠️ Kein Anlageberater!"
                 )
                 exit_messages.append(msg)
                 to_close.append((ticker, "TSL mit Gewinn"))
 
-            # TSL mit Verlust
             elif c <= tsl_lvl and c < entry:
                 msg = (
-                    "TSL AUSGELOEST - " + ticker + "\n"
+                    "⚠️ <b>TSL AUSGELOEST - " + ticker + "</b>\n"
                     "Kurs: " + str(round(c,2)) + " | TSL-Level: " + str(tsl_lvl) + "\n"
                     "PnL: " + str(pnl_pct) + "%\n"
-                    "--------------------------------\n"
-                    "Aktion: Position schliessen!\n"
-                    "Rueckgang von " + str(round(tsl_pct*100,1)) + "% vom Hochpunkt."
+                    "────────────────────\n"
+                    "📋 <b>Aktion Finanzen.Zero:</b>\n"
+                    "1. Trailing Stop hat ausgeloest\n"
+                    "2. KO/OS sollte verkauft sein — pruefen!\n"
+                    "3. Falls nicht: sofort Market verkaufen\n"
+                    "────────────────────\n"
+                    "⚠️ Kein Anlageberater!"
                 )
                 exit_messages.append(msg)
                 to_close.append((ticker, "TSL Verlust"))
 
-            # Technischer Ausstieg
             else:
                 e10  = float(close.ewm(span=10, adjust=False).mean().iloc[-1])
                 e20  = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
                 mf   = close.ewm(span=12, adjust=False).mean()
-                ms   = close.ewm(span=26, adjust=False).mean()
-                mh   = float((mf - ms).iloc[-1])
-                mh_p = float((mf - ms).iloc[-2])
+                ms_s = close.ewm(span=26, adjust=False).mean()
+                mh   = float((mf - ms_s).iloc[-1])
+                mh_p = float((mf - ms_s).iloc[-2])
                 if e10 < e20 and mh < 0 and mh < mh_p:
                     msg = (
-                        "TECHNISCHER AUSSTIEG - " + ticker + "\n"
+                        "📉 <b>TECH. AUSSTIEG - " + ticker + "</b>\n"
                         "Kurs: " + str(round(c,2)) + " | Entry: " + str(entry) + "\n"
                         "PnL: " + str(pnl_pct) + "%\n"
-                        "--------------------------------\n"
-                        "EMA10 unter EMA20 + MACD negativ\n"
-                        "Empfehlung: Ausstieg pruefen!"
+                        "────────────────────\n"
+                        "EMA10 < EMA20 + MACD negativ\n"
+                        "📋 <b>Empfehlung Finanzen.Zero:</b>\n"
+                        "1. Chart pruefen — Trendbruch bestaetigt?\n"
+                        "2. Wenn ja: KO/OS verkaufen\n"
+                        "3. TSL enger setzen als Absicherung\n"
+                        "────────────────────\n"
+                        "⚠️ Kein Anlageberater!"
                     )
                     exit_messages.append(msg)
 
@@ -392,7 +684,8 @@ def scan_megatrend_universe():
             a = analyze_ticker(ticker)
             if a and a["direction"] == "LONG":
                 info = WATCHLIST.get(ticker, {
-                    "name": ticker, "wkn": "suchen",
+                    "name": ticker, "wkn": "suchen", "isin": "",
+                    "slug": ticker.lower().replace(".de",""),
                     "megatrend": sektor, "market": "US",
                 })
                 results.append({"ticker": ticker, "info": info,
@@ -450,6 +743,49 @@ def get_claude_tagesbericht(top_results, markt_info):
                                 messages=[{"role": "user", "content": prompt}])
     return r.content[0].text
 
+# ── Signal-Nachricht bauen (NEU in v4) ─────────────────────────────────────────
+
+def build_signal_msg(ticker, info, analysis, sektor, claude_text, now, derivate_text):
+    stars     = "*" * (1 if analysis["score"] == 6 else 2 if analysis["score"] == 7 else 3)
+    entry     = round(analysis["price"], 2)
+    sl        = analysis["stop_loss"]
+    tp1       = analysis["tp1"]
+    tp2       = analysis["tp2"]
+    tsl_pct   = analysis["tsl_pct"]
+    tsl_level = round(entry * (1 - tsl_pct / 100), 2)
+
+    msg = (
+        "📊 <b>SIGNAL - " + ticker + "</b> " + stars + "\n"
+        + "<b>" + info.get("name", ticker) + "</b>"
+        + " | Score <b>" + str(analysis["score"]) + "/8</b> | " + now + "\n"
+        + "<b>MEGATREND: " + sektor + "</b>\n"
+        + "────────────────────────\n"
+        + claude_text + "\n"
+        + "────────────────────────\n"
+        + "📋 <b>Aktie WKN:</b> <code>" + info.get("wkn","suchen") + "</code>\n"
+        + derivate_text + "\n"
+        + "────────────────────────\n"
+        + "📌 <b>TRADE-PLAN:</b>\n"
+        + "  Entry:  <b>" + str(entry) + "</b>\n"
+        + "  Stop:   <b>" + str(sl) + "</b>  ← sofort setzen\n"
+        + "  TP1:    <b>" + str(tp1) + "</b>  ← 50% schliessen\n"
+        + "  TP2:    <b>" + str(tp2) + "</b>  ← Rest schliessen\n"
+        + "  R:R:    1:" + str(analysis["rr"]) + "\n"
+        + "────────────────────────\n"
+        + "🔁 <b>TSL bei Finanzen.Zero:</b>\n"
+        + "  Ordertyp → TSL → Abstand <b>" + str(tsl_pct) + "%</b>\n"
+        + "  (= Kurs " + str(tsl_level) + " bei Entry)\n"
+        + "  Bei TP1: TSL auf Break-Even <b>" + str(entry) + "</b> nachziehen\n"
+        + "────────────────────────\n"
+        + "🚪 <b>AUSSTIEGS-PLAN Derivat:</b>\n"
+        + "  TP1 → 50% des KO/OS verkaufen\n"
+        + "  TP2 → Rest verkaufen\n"
+        + "  TSL ausgeloest → sofort schliessen\n"
+        + "  Kurs unter Stop → sofort schliessen\n"
+        + "⚠️ Kein Anlageberater!"
+    )
+    return msg
+
 # ── Telegram ───────────────────────────────────────────────────────────────────
 
 def send_telegram(message):
@@ -457,8 +793,8 @@ def send_telegram(message):
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
     url     = "https://api.telegram.org/bot" + token + "/sendMessage"
     payload = {
-        "chat_id":   chat_id,
-        "text":      message,
+        "chat_id":    chat_id,
+        "text":       message,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
@@ -495,9 +831,10 @@ def run_scan():
     is_afternoon = 14 <= hour <= 16
 
     print("\n" + "="*55)
-    print("Trading Scanner v3 - " + now)
+    print("Trading Scanner v4 - " + now)
     mode = "MORGEN" if is_morning else "NACHMITTAG" if is_afternoon else "INTRADAY"
     print("Modus: " + mode + " | Offene Positionen: " + str(len(positions)))
+    print("BS4 verfuegbar: " + str(BS4_AVAILABLE))
     print("="*55)
 
     # EXIT-SIGNALE zuerst pruefen
@@ -555,10 +892,9 @@ def run_scan():
                     c  = float(df["Close"].squeeze().iloc[-1]) if not df.empty else 0
                     pnl = round(((c - pos["entry"]) / pos["entry"]) * 100, 1) if pos["entry"] else 0
                     sign = "+" if pnl >= 0 else ""
-                    emoji = "gruen" if pnl >= 0 else "rot"
                     pos_lines.append(
                         pticker + ": Entry " + str(pos["entry"])
-                        + " -> " + str(round(c,2))
+                        + " → " + str(round(c,2))
                         + " (" + sign + str(pnl) + "%)"
                         + " | SL: " + str(pos["stop"])
                         + " | TP1: " + str(pos["tp1"])
@@ -567,9 +903,9 @@ def run_scan():
                     pos_lines.append(pticker + ": Daten nicht verfuegbar")
 
             pos_msg = (
-                "<b>OFFENE POSITIONEN (" + str(len(positions)) + ")</b>\n"
+                "📂 <b>OFFENE POSITIONEN (" + str(len(positions)) + ")</b>\n"
                 + "\n".join(pos_lines)
-                + "\n\nKein Anlageberater - eigene Analyse!"
+                + "\n\n⚠️ Kein Anlageberater!"
             )
             send_telegram(pos_msg)
             print("  -> " + str(len(positions)) + " Positionen gesendet")
@@ -584,15 +920,14 @@ def run_scan():
             bericht = "Analyse nicht verfuegbar."
 
         label = "MORGEN-BERICHT" if is_morning else "NACHMITTAG-BERICHT"
-        emoji = "Morgen" if is_morning else "Nachmittag"
 
         msg = (
-            "<b>" + label + " - " + now + "</b>\n"
+            "📈 <b>" + label + " - " + now + "</b>\n"
             + markt_info + "\n"
-            + "--------------------------------\n"
+            + "────────────────────────\n"
             + bericht + "\n"
-            + "--------------------------------\n"
-            + "<b>Top-" + str(TOP_N) + " Setups (8-Punkte-System):</b>\n"
+            + "────────────────────────\n"
+            + "<b>Top-" + str(TOP_N) + " Setups:</b>\n"
         )
 
         for i, r in enumerate(top5, 1):
@@ -610,34 +945,25 @@ def run_scan():
                 + " | " + r["sektor"] + "\n"
             )
 
-        msg += "\nKein Anlageberater - eigene Analyse erforderlich!"
+        msg += "\n⚠️ Kein Anlageberater!"
 
         if len(msg) > 4000:
-            msg = msg[:3950] + "\n...\nKein Anlageberater!"
+            msg = msg[:3950] + "\n...\n⚠️ Kein Anlageberater!"
 
         send_telegram(msg)
         print("\n" + label + " gesendet")
 
-        # Echte Signale (Score >= MIN_SCORE) einzeln senden
+        # Echte Signale einzeln mit Derivaten senden
         for r in top5:
             a = r["analysis"]
             if a["score"] >= MIN_SCORE and not recently_sent(r["ticker"], signals):
                 print("\nEinzel-Signal: " + r["ticker"] + " " + str(a["score"]) + "/8")
+                print("  Suche Derivate fuer " + r["ticker"] + "...")
+                derivate_text = fetch_derivate(r["ticker"], r["info"], a["price"])
                 try:
                     sig = get_claude_signal(r["ticker"], a, r["info"])
-                    stars = "*" * (1 if a["score"] == 6 else 2 if a["score"] == 7 else 3)
-                    sig_msg = (
-                        "<b>SIGNAL - " + r["ticker"] + "</b> " + stars + "\n"
-                        + "<b>" + r["info"].get("name", r["ticker"]) + "</b>"
-                        + " | Score <b>" + str(a["score"]) + "/8</b>\n"
-                        + "<b>MEGATREND: " + r["sektor"] + "</b>\n"
-                        + "--------------------------------\n"
-                        + sig + "\n"
-                        + "--------------------------------\n"
-                        + "WKN: <code>" + r["info"].get("wkn","suchen") + "</code>\n"
-                        + "KO: hsbc-zertifikate.de -> " + r["ticker"] + " -> Turbo Long\n"
-                        + "TSL: " + str(a["tsl_pct"]) + "% | R:R 1:" + str(a["rr"]) + "\n"
-                        + "Kein Anlageberater!"
+                    sig_msg = build_signal_msg(
+                        r["ticker"], r["info"], a, r["sektor"], sig, now, derivate_text
                     )
                     if send_telegram(sig_msg):
                         signals[r["ticker"]] = datetime.now().isoformat()
@@ -653,8 +979,11 @@ def run_scan():
         for sektor, tickers in MEGATREND_UNIVERSE.items():
             for t in tickers[:5]:
                 if t not in intraday:
-                    intraday[t] = {"name": t, "wkn": "suchen",
-                                   "megatrend": sektor, "market": "US"}
+                    intraday[t] = {
+                        "name": t, "wkn": "suchen", "isin": "",
+                        "slug": t.lower().replace(".de",""),
+                        "megatrend": sektor, "market": "US",
+                    }
 
         signals_found = []
         for ticker, info in intraday.items():
@@ -669,25 +998,15 @@ def run_scan():
                 if recently_sent(ticker, signals):
                     print("  -> Bereits gesendet")
                     continue
-                print("  SIGNAL!")
+                print("  SIGNAL! Suche Derivate...")
+                derivate_text = fetch_derivate(ticker, info, a["price"])
                 try:
                     sig = get_claude_signal(ticker, a, info)
                 except Exception as e:
                     sig = "Analyse nicht verfuegbar."
 
-                stars   = "*" * (1 if a["score"] == 6 else 2 if a["score"] == 7 else 3)
-                sig_msg = (
-                    "<b>SIGNAL - " + ticker + "</b> " + stars + "\n"
-                    + "<b>" + info.get("name",ticker) + "</b>"
-                    + " | Score <b>" + str(a["score"]) + "/8</b> | " + now + "\n"
-                    + "<b>MEGATREND: " + info["megatrend"] + "</b>\n"
-                    + "--------------------------------\n"
-                    + sig + "\n"
-                    + "--------------------------------\n"
-                    + "WKN: <code>" + info.get("wkn","suchen") + "</code>\n"
-                    + "KO: hsbc-zertifikate.de -> " + ticker + " -> Turbo Long\n"
-                    + "TSL: " + str(a["tsl_pct"]) + "% | R:R 1:" + str(a["rr"]) + "\n"
-                    + "Kein Anlageberater!"
+                sig_msg = build_signal_msg(
+                    ticker, info, a, info["megatrend"], sig, now, derivate_text
                 )
                 if send_telegram(sig_msg):
                     signals[ticker] = datetime.now().isoformat()
