@@ -316,33 +316,32 @@ def fetch_derivate(ticker, info, entry_price):
 def _get_onvista_entity(isin):
     """Sucht onvista Entity-ID via ISIN. Gibt dict {type, id} zurueck oder None."""
     try:
-        url  = "https://api.onvista.de/api/v1/instruments/search/query"
-        resp = requests.get(url, params={"query": isin, "limit": 5},
+        url  = "https://api.onvista.de/api/v1/instruments/search/facet"
+        resp = requests.get(url, params={"searchValue": isin, "perType": 5},
                             headers=ONVISTA_HEADS, timeout=10)
         if resp.status_code != 200:
             print("  onvista Entity: HTTP " + str(resp.status_code))
             return None
 
         data  = resp.json()
-        items = data.get("items", data if isinstance(data, list) else [])
-
-        for item in items:
-            isin_check = str(item.get("isin", ""))
-            if isin_check.upper() == isin.upper():
-                etype = str(item.get("entityType", "STOCK"))
-                eid   = str(item.get("entityValue", item.get("id", "")))
+        # facet API: {"data": {"STOCK": {"list": [...], "total": N}, ...}}
+        # Reihenfolge: STOCK > FUND > ETF > INDEX
+        for etype in ["STOCK", "FUND", "ETF", "INDEX", "CURRENCY"]:
+            section = data.get("data", {}).get(etype, {})
+            items   = section.get("list", []) if isinstance(section, dict) else []
+            for item in items:
+                isin_check = str(item.get("isin", ""))
+                eid = str(item.get("entityValue", item.get("id", "")))
                 if eid:
-                    print("  onvista Entity OK: " + etype + "/" + eid)
+                    if isin_check.upper() == isin.upper():
+                        print("  onvista Entity OK: " + etype + "/" + eid)
+                        return {"type": etype, "id": eid}
+            if items:  # Fallback: erstes Ergebnis dieses Typs
+                first = items[0]
+                eid   = str(first.get("entityValue", first.get("id", "")))
+                if eid:
+                    print("  onvista Entity (Fallback): " + etype + "/" + eid)
                     return {"type": etype, "id": eid}
-
-        # Fallback: erstes Ergebnis nehmen
-        if items:
-            first = items[0]
-            etype = str(first.get("entityType", "STOCK"))
-            eid   = str(first.get("entityValue", first.get("id", "")))
-            if eid:
-                print("  onvista Entity (Fallback): " + etype + "/" + eid)
-                return {"type": etype, "id": eid}
 
     except Exception as e:
         print("  onvista Entity Fehler: " + str(e))
@@ -771,13 +770,14 @@ def get_claude_signal(ticker, analysis, info):
         + "Megatrend: " + info.get("megatrend", "-") + "\n\n"
         + "Format: 1) Empfehlung 2) Begruendung (2 Saetze) 3) Levels 4) Megatrend. Emojis nutzen."
     )
-    # Retry-Logik: 2 Versuche mit je 25s Timeout
+    # Retry-Logik: 2 Versuche
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        print("  Claude: ANTHROPIC_API_KEY nicht gesetzt!")
+        return _claude_fallback(ticker, analysis, info)
     for attempt in range(2):
         try:
-            client = anthropic.Anthropic(
-                api_key=os.environ["ANTHROPIC_API_KEY"],
-                timeout=25.0,
-            )
+            client = anthropic.Anthropic(api_key=api_key)
             r = client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=400,
@@ -788,16 +788,7 @@ def get_claude_signal(ticker, analysis, info):
             print("  Claude-Signal Versuch " + str(attempt+1) + " Fehler: " + str(e))
             if attempt == 0:
                 import time; time.sleep(3)
-    # Fallback: kompakte Analyse ohne Claude
-    return (
-        "📊 <b>Setup:</b> " + ticker + " Score " + str(analysis["score"]) + "/8\n"
-        + "📈 Trend: EMA-Faecher "
-        + ("✅" if "OK" in analysis["checks"].get("EMA-Faecher","") else "❌")
-        + " | RSI " + str(round(analysis["rsi"],1))
-        + " | MACD "
-        + ("✅" if "OK" in analysis["checks"].get("MACD","") else "❌") + "\n"
-        + "💡 Megatrend: " + info.get("megatrend", "-")
-    )
+    return _claude_fallback(ticker, analysis, info)
 
 def get_claude_tagesbericht(top_results, markt_info):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
