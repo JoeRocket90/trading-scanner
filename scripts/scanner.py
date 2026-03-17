@@ -113,6 +113,91 @@ MEGATREND_UNIVERSE = {
     ],
 }
 
+
+# ── S&P 500 Universum ──────────────────────────────────────────────────────────
+
+def get_sp500_tickers():
+    """Holt aktuelle S&P 500 Liste von Wikipedia."""
+    try:
+        import urllib.request
+        url  = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        req  = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8")
+
+        # Ticker aus erster Tabellen-Spalte extrahieren
+        tickers = []
+        in_table = False
+        for line in html.split("\n"):
+            if 'id="constituents"' in line:
+                in_table = True
+            if in_table and '<td><a href="/wiki/' in line:
+                import re
+                m = re.search(r'title="([A-Z]{1,5})(?:\s|")', line)
+                if m:
+                    tickers.append(m.group(1))
+            if in_table and len(tickers) > 490:
+                break
+
+        # Fallback: direkt aus Tabellenzellen
+        if len(tickers) < 400:
+            tickers = []
+            import re
+            matches = re.findall(r'<td><a href="/wiki/[^"]+">([A-Z]{1,5})</a></td>', html)
+            tickers = list(dict.fromkeys(matches))  # Duplikate entfernen
+
+        print("  S&P500: " + str(len(tickers)) + " Titel geladen")
+        return tickers[:503]  # max 503 Titel
+
+    except Exception as e:
+        print("  S&P500 Fehler: " + str(e))
+        # Fallback: Kern-Watchlist Tickers
+        return list(WATCHLIST.keys())
+
+
+# ── Finviz Pre-Screener ────────────────────────────────────────────────────────
+
+def get_finviz_candidates(entry_rsi_min=45, entry_rsi_max=70, min_volume=500000):
+    """
+    Holt Top-Kandidaten via Finviz Screener.
+    Filter: RSI 45-70, Volumen >500k, EMA20 ueber EMA50 (uptrend).
+    Gibt max. 50 Ticker zurueck fuer unser 8-Punkte-System.
+    """
+    try:
+        import urllib.request, re
+
+        # Finviz Screener URL mit Filtern:
+        # ta_rsi_ob = RSI nicht ueberkauft
+        # ta_sma20_price_pa = Preis ueber 20-Tage-SMA
+        # ta_sma50_price_pa = Preis ueber 50-Tage-SMA  
+        # sh_avgvol_o500 = Durchschnittsvolumen > 500k
+        # ta_pattern_channel_up = Aufwaertstrendkanal
+        url = (
+            "https://finviz.com/screener.ashx?v=111"
+            "&f=ta_sma20_price_pa,ta_sma50_price_pa,sh_avgvol_o500,"
+            "ta_rsi_ob40,ta_rsi_os30,ta_beta_o0.5"
+            "&o=-volume&r=1"
+        )
+        req  = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8")
+
+        # Ticker aus Screener-Tabelle extrahieren
+        tickers = re.findall(r'screener\.ashx\?[^"]*ticker=([A-Z]{1,5})', html)
+        if not tickers:
+            # Fallback Pattern
+            tickers = re.findall(r'quote\.ashx\?t=([A-Z]{1,5})"', html)
+
+        tickers = list(dict.fromkeys(tickers))[:50]  # max 50, keine Duplikate
+        print("  Finviz: " + str(len(tickers)) + " Kandidaten gefunden")
+        return tickers
+
+    except Exception as e:
+        print("  Finviz Fehler: " + str(e) + " — nutze Megatrend-Universum")
+        return []
+
+
 # ── Indikatoren ────────────────────────────────────────────────────────────────
 
 def calc_ema(series, period):
@@ -935,7 +1020,7 @@ def run_scan():
     is_afternoon = 14 <= hour <= 16
 
     print("\n" + "="*55)
-    print("Trading Scanner v4 - " + now)
+    print("Trading Scanner v4.4 - " + now)
     mode = "MORGEN" if is_morning else "NACHMITTAG" if is_afternoon else "INTRADAY"
     print("Modus: " + mode + " | Offene Positionen: " + str(len(positions)))
     print("BS4 verfuegbar: " + str(BS4_AVAILABLE))
@@ -975,6 +1060,27 @@ def run_scan():
             if r["ticker"] not in seen:
                 seen.add(r["ticker"])
                 all_results.append(r)
+
+        # Morgen-Bericht: S&P 500 komplett scannen
+        if is_morning:
+            print("\nS&P 500 Scan...")
+            sp500 = get_sp500_tickers()
+            sp500_hits = 0
+            for ticker in sp500:
+                if ticker in seen:
+                    continue
+                seen.add(ticker)
+                a = analyze_ticker(ticker)
+                if a and a["direction"] == "LONG" and a["score"] >= 5:
+                    info = WATCHLIST.get(ticker, {
+                        "name": ticker, "wkn": "suchen", "isin": "",
+                        "slug": ticker.lower(),
+                        "megatrend": "S&P 500", "market": "US",
+                    })
+                    all_results.append({"ticker": ticker, "info": info,
+                                        "analysis": a, "sektor": "S&P 500"})
+                    sp500_hits += 1
+            print("  S&P500: " + str(sp500_hits) + " Long-Kandidaten gefunden")
 
         all_results.sort(key=lambda x: x["analysis"]["score"], reverse=True)
         top5 = all_results[:TOP_N]
@@ -1080,6 +1186,8 @@ def run_scan():
     else:
         print("\nIntraday-Scan...")
         intraday = dict(WATCHLIST)
+
+        # Megatrend-Universum (immer)
         for sektor, tickers in MEGATREND_UNIVERSE.items():
             for t in tickers[:5]:
                 if t not in intraday:
@@ -1088,6 +1196,20 @@ def run_scan():
                         "slug": t.lower().replace(".de",""),
                         "megatrend": sektor, "market": "US",
                     }
+
+        # Finviz Pre-Screener: Top 50 Momentum-Kandidaten
+        print("\nFinviz Pre-Screener...")
+        finviz_tickers = get_finviz_candidates()
+        finviz_added = 0
+        for t in finviz_tickers:
+            if t not in intraday:
+                intraday[t] = {
+                    "name": t, "wkn": "suchen", "isin": "",
+                    "slug": t.lower(),
+                    "megatrend": "Finviz-Screener", "market": "US",
+                }
+                finviz_added += 1
+        print("  " + str(finviz_added) + " neue Finviz-Titel hinzugefuegt")
 
         signals_found = []
         for ticker, info in intraday.items():
