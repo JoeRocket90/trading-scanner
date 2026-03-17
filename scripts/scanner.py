@@ -59,6 +59,22 @@ WATCHLIST = {
     "SAP.DE": {"name": "SAP",              "wkn": "716460",  "isin": "DE0007164600", "slug": "sap",              "megatrend": "AI & Halbleiter", "market": "DAX"},
     "SPY":    {"name": "S&P 500 ETF",      "wkn": "A0AET0",  "isin": "US78462F1030", "slug": "spdr-sp-500",      "megatrend": "Index",           "market": "ETF"},
     "QQQ":    {"name": "Nasdaq 100 ETF",   "wkn": "A0AET7",  "isin": "US46090E1038", "slug": "invesco-qqq-trust","megatrend": "Index",           "market": "ETF"},
+    # Robotik
+    "ISRG":   {"name": "Intuitive Surgical","wkn": "A14QRZ",  "isin": "US46120E6023", "slug": "intuitive-surgical",  "megatrend": "Robotik",         "market": "US"},
+    "PATH":   {"name": "UiPath",            "wkn": "A2QHKM",  "isin": "US90364P1057", "slug": "uipath",              "megatrend": "Robotik",         "market": "US"},
+    "ABB":    {"name": "ABB",               "wkn": "919730",   "isin": "CH0012221716", "slug": "abb",                 "megatrend": "Robotik",         "market": "US"},
+    # Krypto Holder
+    "MSTR":   {"name": "MicroStrategy",     "wkn": "722atti", "isin": "US5949724083", "slug": "microstrategy",       "megatrend": "Krypto Holder",   "market": "US"},
+    "COIN":   {"name": "Coinbase",          "wkn": "A2QP7J",   "isin": "US19260Q1076", "slug": "coinbase-global",     "megatrend": "Krypto Holder",   "market": "US"},
+    "HOOD":   {"name": "Robinhood",         "wkn": "A3CVQC",   "isin": "US7707001027", "slug": "robinhood-markets",   "megatrend": "Krypto Holder",   "market": "US"},
+    # Krypto Miner
+    "MARA":   {"name": "Marathon Digital",  "wkn": "A2DKWZ",   "isin": "US5657881067", "slug": "marathon-digital",    "megatrend": "Krypto Miner",    "market": "US"},
+    "RIOT":   {"name": "Riot Platforms",    "wkn": "A2H51L",   "isin": "US7672921050", "slug": "riot-platforms",      "megatrend": "Krypto Miner",    "market": "US"},
+    "CLSK":   {"name": "CleanSpark",        "wkn": "A2N9PR",   "isin": "US18452B1098", "slug": "cleanspark",          "megatrend": "Krypto Miner",    "market": "US"},
+    # Space
+    "RKLB":   {"name": "Rocket Lab",        "wkn": "A3C8BV",   "isin": "US7731221062", "slug": "rocket-lab-usa",      "megatrend": "Space",           "market": "US"},
+    "ASTS":   {"name": "AST SpaceMobile",   "wkn": "A2QHKN",   "isin": "US00217D1000", "slug": "ast-spacemobile",     "megatrend": "Space",           "market": "US"},
+    "KTOS":   {"name": "Kratos Defense",    "wkn": "A0MXBY",   "isin": "US5006871064", "slug": "kratos-defense",      "megatrend": "Space",           "market": "US"},
 }
 
 # ── Megatrend-Universen ────────────────────────────────────────────────────────
@@ -82,6 +98,18 @@ MEGATREND_UNIVERSE = {
     ],
     "Gold & Rohstoffe": [
         "GLD","GDX","GDXJ","SLV","GOLD","NEM","AEM","WPM","FNV","FCX","MP",
+    ],
+    "Robotik": [
+        "ISRG","PATH","ABB","TER","BRZE","FANUC","IRBT","ACMR","ONTO","AEHR",
+    ],
+    "Krypto Holder": [
+        "MSTR","COIN","HOOD","CLBT","GLXY","BTCS",
+    ],
+    "Krypto Miner": [
+        "MARA","RIOT","CLSK","HUT","BTBT","CIFR","IREN","CORZ",
+    ],
+    "Space": [
+        "RKLB","ASTS","KTOS","LUNR","PL","SPCE","RDW","MNTS","ASTR",
     ],
 }
 
