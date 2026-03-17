@@ -356,7 +356,7 @@ def _fetch_ko_onvista(entity, entry_price):
 
     url = ("https://api.onvista.de/api/v1/instruments/"
            + entity["type"] + "/" + entity["id"]
-           + "/derivatives/list")
+           + "/derivatives")
 
     params = {
         "derivativeCategory": "KNOCK_OUT",
@@ -373,8 +373,11 @@ def _fetch_ko_onvista(entity, entry_price):
             return []
 
         data  = resp.json()
-        items = data.get("list", data.get("items", data if isinstance(data, list) else []))
-        print("  KO onvista: " + str(len(items)) + " Treffer")
+        # onvista gibt {"list": [...], "total": N} zurueck
+        items = data.get("list", data.get("items", data.get("data", [])))
+        if isinstance(items, dict): items = items.get("list", [])
+        if not items and isinstance(data, list): items = data
+        print("  KO onvista: " + str(len(items)) + " Treffer raw")
 
         for item in items:
             try:
@@ -428,7 +431,7 @@ def _fetch_os_onvista(entity, entry_price):
 
     url = ("https://api.onvista.de/api/v1/instruments/"
            + entity["type"] + "/" + entity["id"]
-           + "/derivatives/list")
+           + "/derivatives")
 
     params = {
         "derivativeCategory": "WARRANT",
@@ -444,8 +447,10 @@ def _fetch_os_onvista(entity, entry_price):
             return None
 
         data  = resp.json()
-        items = data.get("list", data.get("items", data if isinstance(data, list) else []))
-        print("  OS onvista: " + str(len(items)) + " Treffer")
+        items = data.get("list", data.get("items", data.get("data", [])))
+        if isinstance(items, dict): items = items.get("list", [])
+        if not items and isinstance(data, list): items = data
+        print("  OS onvista: " + str(len(items)) + " Treffer raw")
 
         for item in items:
             try:
