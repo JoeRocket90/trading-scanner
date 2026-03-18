@@ -902,6 +902,21 @@ def scan_megatrend_universe():
 
 # ── Claude Analyse ─────────────────────────────────────────────────────────────
 
+
+def _claude_fallback(ticker, analysis, info):
+    """Kompakte Analyse wenn Claude API nicht verfuegbar."""
+    checks = analysis.get("checks", {})
+    return (
+        "📊 <b>Technische Analyse:</b>\n"
+        + "EMA-Faecher: " + ("✅" if "OK" in checks.get("EMA-Faecher","") else "❌")
+        + " | EMA200: "   + ("✅" if "OK" in checks.get("EMA200","") else "❌")
+        + " | RSI: "      + str(round(analysis["rsi"],1)) + "\n"
+        + "MACD: "        + ("✅" if "OK" in checks.get("MACD","") else "❌")
+        + " | Volumen: "  + ("✅" if "OK" in checks.get("Volumen","") else "~")
+        + " | Fib: "      + ("✅" if "OK" in checks.get("Fibonacci","") else "~") + "\n"
+        + "💡 Megatrend: " + info.get("megatrend", "-")
+    )
+
 def get_claude_signal(ticker, analysis, info):
     checks = " | ".join([k + ": " + v for k, v in analysis["checks"].items()])
     prompt = (
