@@ -1467,11 +1467,27 @@ def run_scan():
     signals   = state["signals"]
     positions = state["positions"]
 
-    is_morning   = 7  <= hour <= 9
-    is_afternoon = 14 <= hour <= 16
+    # SCAN_MODE aus Telegram-Befehl (gesetzt via env variable)
+    scan_mode = os.environ.get("SCAN_MODE", "auto").lower()
+    # auto = normaler Zeitplan | megatrend = nur Megatrends | global = alles
+
+    if scan_mode == "megatrend":
+        is_morning   = True
+        is_afternoon = False
+        force_megatrend_only = True
+    elif scan_mode == "global":
+        is_morning   = True
+        is_afternoon = False
+        force_megatrend_only = False
+    else:
+        is_morning   = 7  <= hour <= 9
+        is_afternoon = 14 <= hour <= 16
+        force_megatrend_only = False
 
     print("\n" + "="*55)
     print("Trading Scanner v5 - " + now)
+    if scan_mode != "auto":
+        print("MANUELLER SCAN via Telegram: " + scan_mode.upper())
     mode = "MORGEN" if is_morning else "NACHMITTAG" if is_afternoon else "INTRADAY"
     print("Modus: " + mode + " | Offene Positionen: " + str(len(positions)))
     print("BS4 verfuegbar: " + str(BS4_AVAILABLE))
@@ -1512,8 +1528,8 @@ def run_scan():
                 seen.add(r["ticker"])
                 all_results.append(r)
 
-        # Morgen-Bericht: S&P 500 komplett scannen
-        if is_morning:
+        # Morgen-Bericht: S&P 500 komplett scannen (nur bei Global-Scan oder Auto)
+        if is_morning and not force_megatrend_only:
             print("\nS&P 500 Scan...")
             sp500 = get_sp500_tickers()
             sp500_hits = 0
