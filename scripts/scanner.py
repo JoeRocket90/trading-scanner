@@ -76,6 +76,29 @@ WATCHLIST = {
     "RKLB":   {"name": "Rocket Lab",        "wkn": "A3C8BV",   "isin": "US7731221062", "slug": "rocket-lab-usa",      "megatrend": "Space",           "market": "US"},
     "ASTS":   {"name": "AST SpaceMobile",   "wkn": "A2QHKN",   "isin": "US00217D1000", "slug": "ast-spacemobile",     "megatrend": "Space",           "market": "US"},
     "KTOS":   {"name": "Kratos Defense",    "wkn": "A0MXBY",   "isin": "US5006871064", "slug": "kratos-defense",      "megatrend": "Space",           "market": "US"},
+    # Space Erweiterung
+    "LUNR":   {"name": "Intuitive Machines", "wkn": "A3EWUK",   "isin": "US46120E8057", "slug": "intuitive-machines",  "megatrend": "Space",           "market": "US"},
+    "PL":     {"name": "Planet Labs",        "wkn": "A3C4HZ",   "isin": "US72705L1044", "slug": "planet-labs",         "megatrend": "Space",           "market": "US"},
+    "SPCE":   {"name": "Virgin Galactic",    "wkn": "A2PTTX",   "isin": "US92766K1060", "slug": "virgin-galactic",     "megatrend": "Space",           "market": "US"},
+    # Ruestung Erweiterung
+    "HII":    {"name": "Huntington Ingalls", "wkn": "A1C5BH",   "isin": "US4455921045", "slug": "huntington-ingalls",  "megatrend": "Ruestung",        "market": "US"},
+    "AXON":   {"name": "Axon Enterprise",    "wkn": "A14M2J",   "isin": "US05464C1018", "slug": "axon-enterprise",     "megatrend": "Ruestung",        "market": "US"},
+    # Krypto Erweiterung
+    "HUT":    {"name": "Hut 8 Mining",       "wkn": "A3CPFE",   "isin": "CA44879A1075", "slug": "hut-8-mining",        "megatrend": "Krypto Miner",    "market": "US"},
+    "IREN":   {"name": "Iris Energy",        "wkn": "A3DLLA",   "isin": "AU0000224483", "slug": "iris-energy",         "megatrend": "Krypto Miner",    "market": "US"},
+    # Energie Erweiterung
+    "CEG":    {"name": "Constellation Energy","wkn": "A3CWWK",  "isin": "US21037T1097", "slug": "constellation-energy","megatrend": "Energie & Power", "market": "US"},
+    "VST":    {"name": "Vistra Energy",      "wkn": "A2N9GM",   "isin": "US92840M1027", "slug": "vistra-energy",       "megatrend": "Energie & Power", "market": "US"},
+    "GEV":    {"name": "GE Vernova",         "wkn": "A3EU3Q",   "isin": "US36828A1016", "slug": "ge-vernova",          "megatrend": "Energie & Power", "market": "US"},
+    # AI Erweiterung
+    "PLTR":   {"name": "Palantir",           "wkn": "A2QA4J",   "isin": "US69608A1088", "slug": "palantir-technologies","megatrend": "AI & Halbleiter", "market": "US"},
+    "ARM":    {"name": "ARM Holdings",       "wkn": "A3EUBN",   "isin": "GB0000595859", "slug": "arm-holdings",        "megatrend": "AI & Halbleiter", "market": "US"},
+    "TSM":    {"name": "TSMC",               "wkn": "909800",   "isin": "US8740391003", "slug": "taiwan-semiconductor", "megatrend": "AI & Halbleiter", "market": "US"},
+    "RTX":    {"name": "RTX Corporation",    "wkn": "870184",   "isin": "US75513E1010", "slug": "rtx-corporation",     "megatrend": "Ruestung",        "market": "US"},
+    "LMT":    {"name": "Lockheed Martin",    "wkn": "894230",   "isin": "US5398301094", "slug": "lockheed-martin",     "megatrend": "Ruestung",        "market": "US"},
+    "NOC":    {"name": "Northrop Grumman",   "wkn": "851915",   "isin": "US6668071029", "slug": "northrop-grumman",    "megatrend": "Ruestung",        "market": "US"},
+    "CVX":    {"name": "Chevron",            "wkn": "852552",   "isin": "US1667641005", "slug": "chevron",             "megatrend": "Energie & Power", "market": "US"},
+    "XOM":    {"name": "ExxonMobil",         "wkn": "852549",   "isin": "US30231G1022", "slug": "exxon-mobil",         "megatrend": "Energie & Power", "market": "US"},
 }
 
 # ── Megatrend-Universen ────────────────────────────────────────────────────────
@@ -858,11 +881,19 @@ def scan_megatrend_universe():
             seen.add(ticker)
             a = analyze_ticker(ticker)
             if a and a["direction"] == "LONG":
-                info = WATCHLIST.get(ticker, {
-                    "name": ticker, "wkn": "suchen", "isin": "",
-                    "slug": ticker.lower().replace(".de",""),
-                    "megatrend": sektor, "market": "US",
-                })
+                if ticker in WATCHLIST:
+                    info = WATCHLIST[ticker]
+                else:
+                    # Ticker nicht in Watchlist → yfinance name holen
+                    try:
+                        yf_name = yf.Ticker(ticker).info.get("shortName", ticker)
+                    except:
+                        yf_name = ticker
+                    info = {
+                        "name": yf_name, "wkn": "suchen", "isin": "",
+                        "slug": ticker.lower().replace(".de",""),
+                        "megatrend": sektor, "market": "US",
+                    }
                 results.append({"ticker": ticker, "info": info,
                                  "analysis": a, "sektor": sektor})
     results.sort(key=lambda x: x["analysis"]["score"], reverse=True)
@@ -1492,11 +1523,18 @@ def run_scan():
                 seen.add(ticker)
                 a = analyze_ticker(ticker)
                 if a and a["direction"] == "LONG" and a["score"] >= 5:
-                    info = WATCHLIST.get(ticker, {
-                        "name": ticker, "wkn": "suchen", "isin": "",
-                        "slug": ticker.lower(),
-                        "megatrend": "S&P 500", "market": "US",
-                    })
+                    if ticker in WATCHLIST:
+                        info = WATCHLIST[ticker]
+                    else:
+                        try:
+                            yf_name = yf.Ticker(ticker).info.get("shortName", ticker)
+                        except:
+                            yf_name = ticker
+                        info = {
+                            "name": yf_name, "wkn": "suchen", "isin": "",
+                            "slug": ticker.lower(),
+                            "megatrend": "S&P 500", "market": "US",
+                        }
                     all_results.append({"ticker": ticker, "info": info,
                                         "analysis": a, "sektor": "S&P 500"})
                     sp500_hits += 1
@@ -1618,8 +1656,12 @@ def run_scan():
         for sektor, tickers in MEGATREND_UNIVERSE.items():
             for t in tickers[:5]:
                 if t not in intraday:
+                    try:
+                        yf_name = yf.Ticker(t).info.get("shortName", t)
+                    except:
+                        yf_name = t
                     intraday[t] = {
-                        "name": t, "wkn": "suchen", "isin": "",
+                        "name": yf_name, "wkn": "suchen", "isin": "",
                         "slug": t.lower().replace(".de",""),
                         "megatrend": sektor, "market": "US",
                     }
