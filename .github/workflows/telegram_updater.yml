@@ -224,7 +224,8 @@ jobs:
           if "gist.github.com" in gist_url and "/raw/" not in gist_url:
               parts = gist_url.rstrip("/").split("/")
               if len(parts) >= 2:
-                  raw_url = f"https://gist.githubusercontent.com/{parts[-2]}/{parts[-1]}/raw/scanner.py"
+                  # Ohne Dateiname → funktioniert unabhaengig vom Dateinamen im Gist
+                  raw_url = f"https://gist.githubusercontent.com/{parts[-2]}/{parts[-1]}/raw"
 
           resp = requests.get(raw_url, timeout=30)
           if resp.status_code != 200:
