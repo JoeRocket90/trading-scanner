@@ -70,12 +70,14 @@ jobs:
 
               tl = text.lower()
 
+              # /update <gist_url>
               m = re.search(r"/update\s+(https?://\S+)", text)
               if m:
                   command  = "update"
                   gist_url = m.group(1)
                   print(f"Update-Befehl: {gist_url}")
                   break
+              # Scan-Befehle
               elif "scan" in tl and "megatrend" in tl:
                   command = "scan_megatrend"
                   print("Scan-Befehl: MEGATREND")
@@ -84,8 +86,14 @@ jobs:
                   command = "scan_global"
                   print("Scan-Befehl: GLOBAL")
                   break
-              elif text in ["/help", "/status", "/hilfe"]:
+              elif "scan" in tl and "watchlist" in tl:
+                  command = "scan_watchlist"
+                  print("Scan-Befehl: WATCHLIST")
+                  break
+              # /scan alleine oder /help → Hilfe anzeigen  ← FIX
+              elif tl in ["/scan", "/help", "/hilfe", "/status", "hilfe", "help"]:
                   command = "help"
+                  print("Hilfe angefordert")
                   break
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
@@ -95,7 +103,103 @@ jobs:
                   f.write(f"gist_url={gist_url}\n")
           PYEOF
 
-      # ── UPDATE ───────────────────────────────────────────────────────────────
+      # ── HILFE ────────────────────────────────────────────────────────────────
+      - name: Hilfe senden
+        if: steps.check.outputs.command == 'help'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 -c "
+          import os, requests
+          requests.post(
+              f\"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage\",
+              json={'chat_id': os.environ['TELEGRAM_CHAT_ID'], 'parse_mode': 'HTML',
+                    'text': (
+                        '📋 <b>Verfügbare Befehle:</b>\n\n'
+                        '🔍 <code>Scan - Megatrend</code>\n'
+                        '→ Alle 9 Megatrend-Sektoren (~3 Min)\n\n'
+                        '🌍 <code>Scan - Global</code>\n'
+                        '→ Megatrends + S\&amp;P 500 (~10 Min)\n\n'
+                        '📋 <code>Scan - Watchlist</code>\n'
+                        '→ Nur Kern-Watchlist (~1 Min)\n\n'
+                        '🔄 <code>/update URL</code>\n'
+                        '→ Scanner-Code aktualisieren\n\n'
+                        '❓ <code>/scan</code> oder <code>/help</code>\n'
+                        '→ Diese Hilfe anzeigen\n\n'
+                        '⚠️ Kein Anlageberater!'
+                    )})"
+
+      # ── SCAN MEGATREND ───────────────────────────────────────────────────────
+      - name: Scan Megatrend starten
+        if: steps.check.outputs.command == 'scan_megatrend'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 -c "
+          import os, requests
+          requests.post(
+              f\"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage\",
+              json={'chat_id': os.environ['TELEGRAM_CHAT_ID'], 'parse_mode': 'HTML',
+                    'text': '🔍 <b>Megatrend-Scan gestartet...</b>\nScanne alle 9 Sektoren (~3 Min)'})"
+
+      - name: Scan Megatrend ausführen
+        if: steps.check.outputs.command == 'scan_megatrend'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCAN_MODE: "megatrend"
+        run: python scripts/scanner.py
+
+      # ── SCAN GLOBAL ──────────────────────────────────────────────────────────
+      - name: Scan Global starten
+        if: steps.check.outputs.command == 'scan_global'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 -c "
+          import os, requests
+          requests.post(
+              f\"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage\",
+              json={'chat_id': os.environ['TELEGRAM_CHAT_ID'], 'parse_mode': 'HTML',
+                    'text': '🌍 <b>Global-Scan gestartet...</b>\nS\&amp;P500 + Megatrends (~10 Min)'})"
+
+      - name: Scan Global ausführen
+        if: steps.check.outputs.command == 'scan_global'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCAN_MODE: "global"
+        run: python scripts/scanner.py
+
+      # ── SCAN WATCHLIST ───────────────────────────────────────────────────────
+      - name: Scan Watchlist starten
+        if: steps.check.outputs.command == 'scan_watchlist'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 -c "
+          import os, requests
+          requests.post(
+              f\"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage\",
+              json={'chat_id': os.environ['TELEGRAM_CHAT_ID'], 'parse_mode': 'HTML',
+                    'text': '📋 <b>Watchlist-Scan gestartet...</b>\n30 Kern-Titel (~1 Min)'})"
+
+      - name: Scan Watchlist ausführen
+        if: steps.check.outputs.command == 'scan_watchlist'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCAN_MODE: "watchlist"
+        run: python scripts/scanner.py
+
+      # ── CODE UPDATE ──────────────────────────────────────────────────────────
       - name: Code-Update verarbeiten
         if: steps.check.outputs.command == 'update'
         env:
@@ -147,7 +251,7 @@ jobs:
           git diff --staged --quiet && echo "Keine Änderungen" || git commit -m "🤖 Auto-Update $(date '+%d.%m.%Y %H:%M')"
           git push
 
-      - name: Update Bestätigung
+      - name: Update-Bestätigung
         if: steps.check.outputs.command == 'update'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -156,56 +260,10 @@ jobs:
           python3 -c "
           import os, requests
           requests.post(f\"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage\",
-              json={'chat_id': os.environ['TELEGRAM_CHAT_ID'],
-                    'text': '🚀 <b>Scanner aktualisiert!</b>\nNeuer Code ist live.', 'parse_mode': 'HTML'})"
+              json={'chat_id': os.environ['TELEGRAM_CHAT_ID'], 'parse_mode': 'HTML',
+                    'text': '🚀 <b>Scanner aktualisiert!</b>\nNeuer Code ist live.'})"
 
-      # ── SCAN MEGATREND ───────────────────────────────────────────────────────
-      - name: Scan Megatrend
-        if: steps.check.outputs.command == 'scan_megatrend'
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SCAN_MODE: "megatrend"
-        run: |
-          python3 -c "
-          import os, requests
-          requests.post(f\"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage\",
-              json={'chat_id': os.environ['TELEGRAM_CHAT_ID'],
-                    'text': '🔍 <b>Megatrend-Scan gestartet...</b>\nScanne alle 9 Sektoren.', 'parse_mode': 'HTML'})"
-          SCAN_MODE=megatrend python scripts/scanner.py
-
-      # ── SCAN GLOBAL ──────────────────────────────────────────────────────────
-      - name: Scan Global
-        if: steps.check.outputs.command == 'scan_global'
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SCAN_MODE: "global"
-        run: |
-          python3 -c "
-          import os, requests
-          requests.post(f\"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage\",
-              json={'chat_id': os.environ['TELEGRAM_CHAT_ID'],
-                    'text': '🌍 <b>Global-Scan gestartet...</b>\nS&P500 + Finviz + alle Sektoren.\n~5 Minuten.', 'parse_mode': 'HTML'})"
-          SCAN_MODE=global python scripts/scanner.py
-
-      # ── HELP ─────────────────────────────────────────────────────────────────
-      - name: Hilfe senden
-        if: steps.check.outputs.command == 'help'
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python3 -c "
-          import os, requests
-          requests.post(f\"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage\",
-              json={'chat_id': os.environ['TELEGRAM_CHAT_ID'],
-                    'text': '📋 <b>Befehle:</b>\n\n🔍 <b>Scan - Megatrend</b>\n→ 9 Megatrend-Sektoren scannen\n\n🌍 <b>Scan - Global</b>\n→ S&P500 + Finviz + Megatrends\n\n🔄 <b>/update URL</b>\n→ Scanner updaten\n\n/help → Diese Hilfe',
-                    'parse_mode': 'HTML'})"
-
-      # ── UPDATE-ID ─────────────────────────────────────────────────────────────
+      # ── UPDATE-ID SPEICHERN ──────────────────────────────────────────────────
       - name: Update-ID speichern
         if: always()
         env:
