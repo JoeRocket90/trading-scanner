@@ -13,6 +13,9 @@ jobs:
   check-telegram:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: write
 
     steps:
       - name: Checkout Repository
@@ -24,6 +27,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Pakete installieren
+        run: pip install requests --quiet
 
       - name: Prüfe Telegram auf Update-Befehl
         id: check
@@ -48,7 +54,8 @@ jobs:
               print("Keine neuen Nachrichten")
               with open(os.environ["GITHUB_OUTPUT"], "a") as f:
                   f.write("has_update=false\n")
-              exit(0)
+                  f.write("new_last_id=0\n")
+              import sys; sys.exit(0)
 
           gist_url  = None
           new_last_id = last_id
