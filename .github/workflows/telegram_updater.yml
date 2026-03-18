@@ -1,0 +1,191 @@
+name: 🔄 Telegram Update Bot
+
+on:
+  schedule:
+    # Alle 5 Minuten prüfen ob Update-Befehl kam
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  check-telegram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Python Setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prüfe Telegram auf Update-Befehl
+        id: check
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LAST_UPDATE_ID: ${{ vars.LAST_UPDATE_ID }}
+        run: |
+          python3 << 'PYEOF'
+          import os, requests, json, re
+
+          token   = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_ID"]
+          last_id = int(os.environ.get("LAST_UPDATE_ID", "0") or "0")
+
+          # Telegram Updates holen
+          url  = f"https://api.telegram.org/bot{token}/getUpdates"
+          resp = requests.get(url, params={"offset": last_id + 1, "timeout": 5})
+          data = resp.json()
+
+          if not data.get("ok") or not data.get("result"):
+              print("Keine neuen Nachrichten")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("has_update=false\n")
+              exit(0)
+
+          gist_url  = None
+          new_last_id = last_id
+
+          for update in data["result"]:
+              uid  = update["update_id"]
+              new_last_id = max(new_last_id, uid)
+              msg  = update.get("message", {})
+              text = msg.get("text", "")
+              cid  = str(msg.get("chat", {}).get("id", ""))
+
+              # Nur Nachrichten aus unserem Chat
+              if cid != chat_id:
+                  continue
+
+              # /update <gist_url> oder /update <raw_url>
+              m = re.search(r"/update\s+(https?://\S+)", text)
+              if m:
+                  gist_url = m.group(1)
+                  print(f"Update-Befehl gefunden: {gist_url}")
+
+          # Neue last_id speichern
+          with open("last_update_id.txt", "w") as f:
+              f.write(str(new_last_id))
+
+          if gist_url:
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write(f"has_update=true\n")
+                  f.write(f"gist_url={gist_url}\n")
+                  f.write(f"new_last_id={new_last_id}\n")
+          else:
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("has_update=false\n")
+                  f.write(f"new_last_id={new_last_id}\n")
+          PYEOF
+
+      - name: Update-Befehl verarbeiten
+        if: steps.check.outputs.has_update == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GIST_URL: ${{ steps.check.outputs.gist_url }}
+        run: |
+          python3 << 'PYEOF'
+          import os, requests
+
+          token    = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id  = os.environ["TELEGRAM_CHAT_ID"]
+          gist_url = os.environ["GIST_URL"]
+
+          def tg(text):
+              requests.post(
+                  f"https://api.telegram.org/bot{token}/sendMessage",
+                  json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+              )
+
+          tg("🔄 <b>Update erkannt!</b>\nLade neuen Scanner-Code...")
+
+          # Gist URL → Raw URL konvertieren
+          raw_url = gist_url
+          if "gist.github.com" in gist_url and "/raw/" not in gist_url:
+              # https://gist.github.com/USER/ID → https://gist.githubusercontent.com/USER/ID/raw/scanner.py
+              parts = gist_url.rstrip("/").split("/")
+              if len(parts) >= 5:
+                  user  = parts[-2]
+                  gid   = parts[-1]
+                  raw_url = f"https://gist.githubusercontent.com/{user}/{gid}/raw/scanner.py"
+
+          print(f"Lade von: {raw_url}")
+          resp = requests.get(raw_url, timeout=30)
+
+          if resp.status_code != 200:
+              tg(f"❌ Fehler beim Laden: HTTP {resp.status_code}\nURL: {raw_url}")
+              exit(1)
+
+          code = resp.text
+
+          # Syntax-Check
+          import ast
+          try:
+              ast.parse(code)
+              print("Syntax OK")
+          except SyntaxError as e:
+              tg(f"❌ Syntax-Fehler im neuen Code:\n{e}\nUpdate abgebrochen.")
+              exit(1)
+
+          # Datei schreiben
+          with open("scripts/scanner.py", "w") as f:
+              f.write(code)
+
+          lines = code.count("\n")
+          tg(f"✅ Code geladen ({lines} Zeilen)\nSyntax OK — committe jetzt...")
+          print(f"Code geschrieben: {lines} Zeilen")
+          PYEOF
+
+      - name: Commit & Push neuer Scanner
+        if: steps.check.outputs.has_update == 'true'
+        run: |
+          git config user.name "Trading Bot Updater"
+          git config user.email "bot@trading-scanner.auto"
+          git add scripts/scanner.py
+          git diff --staged --quiet && echo "Keine Änderungen" || git commit -m "🤖 Auto-Update via Telegram $(date '+%d.%m.%Y %H:%M')"
+          git push
+
+      - name: Bestätigung an Telegram
+        if: steps.check.outputs.has_update == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 << 'PYEOF'
+          import os, requests
+          token   = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_ID"]
+          requests.post(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              json={
+                  "chat_id": chat_id,
+                  "text": (
+                      "🚀 <b>Scanner erfolgreich aktualisiert!</b>\n"
+                      "Neuer Code ist live auf GitHub.\n"
+                      "Nächster Scan übernimmt automatisch."
+                  ),
+                  "parse_mode": "HTML"
+              }
+          )
+          print("Bestätigung gesendet")
+          PYEOF
+
+      - name: Update-ID speichern
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_ID: ${{ steps.check.outputs.new_last_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -n "$NEW_ID" ] && [ "$NEW_ID" != "0" ]; then
+            gh variable set LAST_UPDATE_ID --body "$NEW_ID" --repo "$REPO" || true
+            echo "Update-ID gespeichert: $NEW_ID"
+          fi
