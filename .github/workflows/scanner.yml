@@ -34,7 +34,7 @@ jobs:
           python-version: "3.12"
 
       - name: Abhängigkeiten installieren
-        run: pip install anthropic yfinance pandas requests --quiet
+        run: pip install anthropic yfinance pandas requests beautifulsoup4 lxml --quiet
 
       - name: Signal-Scan ausführen
         env:
