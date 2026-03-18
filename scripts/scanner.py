@@ -1,6 +1,7 @@
 """
-Trading Signal Scanner v4 - Auto-Derivate-Suche
-Neu: Automatische KO-Schein + Optionsschein Suche via finanzen.net bei jedem Signal
+Trading Signal Scanner v5 - Signal DNA
+Neu: Fear&Greed + Makro (FRED) + Reddit Sentiment + Alpha Vantage News
+Jedes Signal zeigt exakt woraus es sich zusammensetzt.
 """
 
 import os
@@ -932,9 +933,423 @@ def get_claude_tagesbericht(top_results, markt_info):
                                 messages=[{"role": "user", "content": prompt}])
     return r.content[0].text
 
-# ── Signal-Nachricht bauen (NEU in v4) ─────────────────────────────────────────
 
-def build_signal_msg(ticker, info, analysis, sektor, claude_text, now, derivate_text):
+# ── SIGNAL DNA — Kontext-Daten ─────────────────────────────────────────────────
+#
+# Kostenlose APIs ohne Key:
+#   Fear & Greed : alternative.me (kein Key)
+#   Reddit WSB   : reddit.com JSON (kein Key)
+#
+# Kostenlose APIs mit Key (GitHub Secrets):
+#   Alpha Vantage: ALPHA_VANTAGE_KEY → News + Fundamentals
+#   FRED          : FRED_API_KEY     → Makrodaten (Zinsen, Inflation)
+
+def get_fear_greed():
+    """Fear & Greed Index von alternative.me — kein API Key noetig."""
+    try:
+        resp = requests.get(
+            "https://api.alternative.me/fng/?limit=1",
+            timeout=8
+        )
+        data = resp.json()["data"][0]
+        value = int(data["value"])
+        label = data["value_classification"]
+
+        # Emoji je nach Wert
+        if value <= 25:
+            emoji = "😱"
+        elif value <= 45:
+            emoji = "😨"
+        elif value <= 55:
+            emoji = "😐"
+        elif value <= 75:
+            emoji = "😊"
+        else:
+            emoji = "🤑"
+
+        # Bewertung fuer Signal: Extreme Fear = gut zum Kaufen
+        bullish = value <= 40  # Extreme Fear / Fear = Kaufsignal
+        return {
+            "value": value,
+            "label": label,
+            "emoji": emoji,
+            "bullish": bullish,
+            "text": emoji + " " + str(value) + "/100 (" + label + ")"
+        }
+    except Exception as e:
+        print("  Fear&Greed Fehler: " + str(e))
+        return None
+
+
+def get_macro_data():
+    """
+    Makrodaten via FRED API.
+    Benoetigt FRED_API_KEY als GitHub Secret (kostenlos: fred.stlouisfed.org).
+    Ohne Key: Fallback auf cached/geschaetzte Werte.
+    """
+    fred_key = os.environ.get("FRED_API_KEY", "")
+    result = {}
+
+    if not fred_key:
+        # Fallback ohne Key — neutrale Anzeige
+        return {"available": False}
+
+    try:
+        base = "https://api.stlouisfed.org/fred/series/observations"
+
+        # Fed Funds Rate (aktuell)
+        r = requests.get(base, params={
+            "series_id": "FEDFUNDS",
+            "api_key": fred_key,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": 1
+        }, timeout=8)
+        fed_rate = float(r.json()["observations"][0]["value"])
+        result["fed_rate"] = fed_rate
+
+        # CPI YoY Inflation
+        r2 = requests.get(base, params={
+            "series_id": "CPIAUCSL",
+            "api_key": fred_key,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": 13
+        }, timeout=8)
+        obs = r2.json()["observations"]
+        cpi_now  = float(obs[0]["value"])
+        cpi_year = float(obs[12]["value"])
+        inflation = round(((cpi_now - cpi_year) / cpi_year) * 100, 1)
+        result["inflation"] = inflation
+
+        result["available"] = True
+        print("  Makro: Fed " + str(fed_rate) + "% | Inflation " + str(inflation) + "%")
+
+    except Exception as e:
+        print("  Makro Fehler: " + str(e))
+        result["available"] = False
+
+    return result
+
+
+def get_reddit_sentiment(ticker):
+    """
+    Reddit WSB Sentiment — kein API Key noetig.
+    Zaehlt Mentions des Tickers in den letzten 25 Hot Posts.
+    """
+    try:
+        clean = ticker.replace(".DE", "").replace(".", "")
+        url   = "https://www.reddit.com/r/wallstreetbets/hot.json?limit=25"
+        resp  = requests.get(url, headers={"User-Agent": "TradingBot/1.0"}, timeout=8)
+        posts = resp.json()["data"]["children"]
+
+        mentions  = 0
+        upvotes   = 0
+        sentiment = 0  # +1 bullish, -1 bearish
+
+        bull_words = ["buy", "long", "calls", "moon", "bullish", "squeeze", "breakout"]
+        bear_words = ["put", "short", "crash", "dump", "bearish", "puts", "dead"]
+
+        for post in posts:
+            d     = post["data"]
+            title = (d.get("title", "") + " " + d.get("selftext", "")).lower()
+
+            if clean.lower() in title or ("$" + clean.lower()) in title:
+                mentions += 1
+                upvotes  += d.get("ups", 0)
+                for w in bull_words:
+                    if w in title:
+                        sentiment += 1
+                for w in bear_words:
+                    if w in title:
+                        sentiment -= 1
+
+        if mentions == 0:
+            return {"mentions": 0, "text": "WSB: keine Erwaehnung"}
+
+        sent_label = "bullish 🟢" if sentiment > 0 else "bearish 🔴" if sentiment < 0 else "neutral ⚪"
+        text = "WSB: " + str(mentions) + "x erwaehnt | " + sent_label + " | " + str(upvotes) + " Upvotes"
+
+        return {
+            "mentions":  mentions,
+            "upvotes":   upvotes,
+            "sentiment": sentiment,
+            "bullish":   sentiment > 0,
+            "text":      text
+        }
+
+    except Exception as e:
+        print("  Reddit Fehler: " + str(e))
+        return {"mentions": 0, "text": "WSB: nicht verfuegbar"}
+
+
+def get_stocktwits_sentiment(ticker):
+    """
+    StockTwits Sentiment — kostenlos, kein API Key noetig.
+    Gibt Bullish/Bearish Ratio der letzten 30 Messages zurueck.
+    StockTwits ist quasi Twitter fuer Trader — sehr relevan fuer Retail-Sentiment.
+    """
+    try:
+        clean = ticker.replace(".DE", "").replace(".", "")
+        url   = "https://api.stocktwits.com/api/2/streams/symbol/" + clean + ".json"
+        resp  = requests.get(url, headers={"User-Agent": "TradingBot/1.0"}, timeout=8)
+
+        if resp.status_code != 200:
+            return {"available": False, "text": "StockTwits: nicht verfuegbar"}
+
+        data     = resp.json()
+        messages = data.get("messages", [])
+
+        if not messages:
+            return {"available": False, "text": "StockTwits: keine Daten"}
+
+        bull = 0
+        bear = 0
+        total = len(messages)
+
+        for msg in messages:
+            entities = msg.get("entities", {})
+            sentiment = entities.get("sentiment", {})
+            if sentiment:
+                basic = sentiment.get("basic", "")
+                if basic == "Bullish":
+                    bull += 1
+                elif basic == "Bearish":
+                    bear += 1
+
+        # Watchlist-Symbol Infos
+        symbol_info = data.get("symbol", {})
+        watching    = symbol_info.get("watchlist_count", 0)
+
+        # Bewertung
+        total_sentiment = bull + bear
+        if total_sentiment == 0:
+            sent_text = "neutral ⚪"
+            bullish   = None
+        else:
+            bull_pct = round((bull / total_sentiment) * 100)
+            if bull_pct >= 65:
+                sent_text = str(bull_pct) + "% bullish 🟢"
+                bullish   = True
+            elif bull_pct <= 35:
+                sent_text = str(100 - bull_pct) + "% bearish 🔴"
+                bullish   = False
+            else:
+                sent_text = str(bull_pct) + "% bull / " + str(100 - bull_pct) + "% bear ⚪"
+                bullish   = None
+
+        watch_text = ""
+        if watching > 0:
+            watch_text = " | 👁 " + str(watching) + " Watchlists"
+
+        text = "ST: " + sent_text + watch_text
+
+        print("  StockTwits " + clean + ": " + text)
+
+        return {
+            "available": True,
+            "bull":      bull,
+            "bear":      bear,
+            "total":     total,
+            "watching":  watching,
+            "bullish":   bullish,
+            "text":      text,
+        }
+
+    except Exception as e:
+        print("  StockTwits Fehler: " + str(e))
+        return {"available": False, "text": "StockTwits: Fehler"}
+
+
+def get_news_sentiment(ticker, name):
+    """
+    News Headlines via Alpha Vantage News API.
+    Benoetigt ALPHA_VANTAGE_KEY als GitHub Secret (kostenlos: alphavantage.co).
+    Ohne Key: Fallback auf yfinance News.
+    """
+    av_key = os.environ.get("ALPHA_VANTAGE_KEY", "")
+
+    # Variante 1: Alpha Vantage (mit Key)
+    if av_key:
+        try:
+            resp = requests.get(
+                "https://www.alphavantage.co/query",
+                params={
+                    "function": "NEWS_SENTIMENT",
+                    "tickers":  ticker.replace(".DE", ""),
+                    "apikey":   av_key,
+                    "limit":    "5",
+                    "sort":     "LATEST"
+                },
+                timeout=10
+            )
+            data = resp.json()
+            feed = data.get("feed", [])
+
+            if not feed:
+                return _news_fallback(ticker)
+
+            headlines = []
+            bull = 0
+            bear = 0
+
+            for item in feed[:5]:
+                title = item.get("title", "")[:60]
+                score = float(item.get("overall_sentiment_score", 0))
+                if score > 0.15:
+                    bull += 1
+                    headlines.append("📰 +" + title)
+                elif score < -0.15:
+                    bear += 1
+                    headlines.append("📰 -" + title)
+                else:
+                    headlines.append("📰 ~" + title)
+
+            summary = str(bull) + " bullish / " + str(bear) + " bearish"
+            return {
+                "headlines": headlines[:3],
+                "bull": bull,
+                "bear": bear,
+                "bullish": bull > bear,
+                "summary": summary
+            }
+        except Exception as e:
+            print("  AlphaVantage News Fehler: " + str(e))
+
+    # Variante 2: yfinance News (kein Key)
+    return _news_fallback(ticker)
+
+
+def _news_fallback(ticker):
+    """News via yfinance — kein Key noetig."""
+    try:
+        t     = yf.Ticker(ticker)
+        news  = t.news[:5] if t.news else []
+
+        if not news:
+            return {"headlines": [], "bull": 0, "bear": 0, "bullish": None, "summary": "keine News"}
+
+        bull_w = ["surge", "rally", "beat", "record", "strong", "gain", "rise", "up", "buy", "upgrade"]
+        bear_w = ["drop", "fall", "miss", "weak", "loss", "down", "cut", "sell", "downgrade", "warning"]
+
+        headlines = []
+        bull = bear = 0
+
+        for n in news[:5]:
+            title = n.get("title", "")[:55]
+            tl    = title.lower()
+            b_hits = sum(1 for w in bull_w if w in tl)
+            s_hits = sum(1 for w in bear_w if w in tl)
+            if b_hits > s_hits:
+                bull += 1
+                headlines.append("📰 +" + title)
+            elif s_hits > b_hits:
+                bear += 1
+                headlines.append("📰 -" + title)
+            else:
+                headlines.append("📰 ~" + title)
+
+        summary = str(bull) + " bullish / " + str(bear) + " bearish"
+        return {
+            "headlines": headlines[:3],
+            "bull": bull, "bear": bear,
+            "bullish": bull > bear,
+            "summary": summary
+        }
+    except Exception as e:
+        print("  News Fallback Fehler: " + str(e))
+        return {"headlines": [], "bull": 0, "bear": 0, "bullish": None, "summary": "nicht verfuegbar"}
+
+
+def build_signal_dna(ticker, analysis, fear_greed, macro, reddit, news, stocktwits=None):
+    """
+    Baut den Signal DNA Block — zeigt exakt woraus das Signal besteht.
+    """
+    lines = ["🔬 <b>SIGNAL DNA:</b>"]
+
+    # 1. Technische Analyse
+    score     = analysis["score"]
+    checks    = analysis["checks"]
+    tech_ok   = sum(1 for v in checks.values() if v.startswith("OK"))
+    tech_line = "  📈 Technik:   " + str(score) + "/8"
+    if score >= 7:
+        tech_line += " ✅✅"
+    elif score >= 6:
+        tech_line += " ✅"
+    # Welche Checks haben bestanden?
+    passed = []
+    if "OK" in checks.get("EMA-Faecher", ""):   passed.append("EMA")
+    if "OK" in checks.get("EMA200", ""):         passed.append("EMA200")
+    if "OK" in checks.get("RSI", "") or "Ueber" in checks.get("RSI", ""): passed.append("RSI")
+    if "OK" in checks.get("MACD", ""):           passed.append("MACD")
+    if "OK" in checks.get("Volumen", ""):        passed.append("Vol")
+    if "OK" in checks.get("Fibonacci", ""):      passed.append("Fib")
+    if passed:
+        tech_line += " (" + "+".join(passed) + ")"
+    lines.append(tech_line)
+
+    # 2. Fear & Greed
+    if fear_greed:
+        fg_line = "  😨 Sentiment: " + fear_greed["text"]
+        if fear_greed["bullish"]:
+            fg_line += " ✅"
+        lines.append(fg_line)
+
+    # 3. Makro
+    if macro and macro.get("available"):
+        fed  = macro.get("fed_rate", "?")
+        infl = macro.get("inflation", "?")
+        macro_line = "  🌍 Makro:     Fed " + str(fed) + "% | Inflation " + str(infl) + "%"
+        # Bewertung: niedrige Inflation + stabile/sinkende Zinsen = bullish
+        if isinstance(infl, float) and infl < 3.5:
+            macro_line += " ✅"
+        lines.append(macro_line)
+
+    # 4. Reddit WSB + StockTwits
+    social_lines = []
+    if reddit and reddit.get("mentions", 0) > 0:
+        r_line = "  🤝 WSB:       " + reddit["text"]
+        if reddit.get("bullish"):
+            r_line += " ✅"
+        social_lines.append(r_line)
+    if stocktwits and stocktwits.get("available"):
+        st_line = "  💬 StockTwits: " + stocktwits["text"]
+        if stocktwits.get("bullish"):
+            st_line += " ✅"
+        social_lines.append(st_line)
+    if social_lines:
+        lines.extend(social_lines)
+    else:
+        lines.append("  🤝 Social:    kein Buzz")
+
+    # 5. News
+    if news:
+        news_line = "  📰 News:      " + news.get("summary", "?")
+        if news.get("bullish"):
+            news_line += " ✅"
+        lines.append(news_line)
+        # Top Headline
+        if news.get("headlines"):
+            lines.append("  " + news["headlines"][0][:55])
+
+    # Gesamt-Bewertung
+    positives = sum([
+        score >= 6,
+        fear_greed and fear_greed.get("bullish", False),
+        macro and macro.get("available") and macro.get("inflation", 99) < 3.5,
+        reddit and reddit.get("bullish", False),
+        stocktwits and stocktwits.get("bullish", False),
+        news and news.get("bullish", False),
+    ])
+    lines.append("  ⭐ Konvergenz: " + str(positives) + "/6 Faktoren bullish")
+
+    return "\n".join(lines)
+
+
+# ── Signal-Nachricht bauen ────────────────────────────────────────────────────
+
+def build_signal_msg(ticker, info, analysis, sektor, claude_text, now, derivate_text,
+                     fear_greed=None, macro=None, reddit=None, news=None, stocktwits=None):
     stars     = "*" * (1 if analysis["score"] == 6 else 2 if analysis["score"] == 7 else 3)
     entry     = round(analysis["price"], 2)
     sl        = analysis["stop_loss"]
@@ -943,11 +1358,16 @@ def build_signal_msg(ticker, info, analysis, sektor, claude_text, now, derivate_
     tsl_pct   = analysis["tsl_pct"]
     tsl_level = round(entry * (1 - tsl_pct / 100), 2)
 
+    # Signal DNA Block
+    dna_block = build_signal_dna(ticker, analysis, fear_greed, macro, reddit, news, stocktwits=stocktwits)
+
     msg = (
         "📊 <b>SIGNAL - " + ticker + "</b> " + stars + "\n"
         + "<b>" + info.get("name", ticker) + "</b>"
         + " | Score <b>" + str(analysis["score"]) + "/8</b> | " + now + "\n"
         + "<b>MEGATREND: " + sektor + "</b>\n"
+        + "────────────────────────\n"
+        + dna_block + "\n"
         + "────────────────────────\n"
         + claude_text + "\n"
         + "────────────────────────\n"
@@ -1020,7 +1440,7 @@ def run_scan():
     is_afternoon = 14 <= hour <= 16
 
     print("\n" + "="*55)
-    print("Trading Scanner v4.4 - " + now)
+    print("Trading Scanner v5 - " + now)
     mode = "MORGEN" if is_morning else "NACHMITTAG" if is_afternoon else "INTRADAY"
     print("Modus: " + mode + " | Offene Positionen: " + str(len(positions)))
     print("BS4 verfuegbar: " + str(BS4_AVAILABLE))
@@ -1168,12 +1588,19 @@ def run_scan():
             a = r["analysis"]
             if a["score"] >= MIN_SCORE and not recently_sent(r["ticker"], signals):
                 print("\nEinzel-Signal: " + r["ticker"] + " " + str(a["score"]) + "/8")
-                print("  Suche Derivate fuer " + r["ticker"] + "...")
+                print("  Suche Derivate + DNA fuer " + r["ticker"] + "...")
                 derivate_text = fetch_derivate(r["ticker"], r["info"], a["price"])
+                # Signal DNA Daten sammeln
+                fear_greed = get_fear_greed()
+                macro      = get_macro_data()
+                reddit      = get_reddit_sentiment(r["ticker"])
+                stocktwits  = get_stocktwits_sentiment(r["ticker"])
+                news        = get_news_sentiment(r["ticker"], r["info"].get("name", r["ticker"]))
                 try:
                     sig = get_claude_signal(r["ticker"], a, r["info"])
                     sig_msg = build_signal_msg(
-                        r["ticker"], r["info"], a, r["sektor"], sig, now, derivate_text
+                        r["ticker"], r["info"], a, r["sektor"], sig, now, derivate_text,
+                        fear_greed=fear_greed, macro=macro, reddit=reddit, news=news, stocktwits=stocktwits
                     )
                     if send_telegram(sig_msg):
                         signals[r["ticker"]] = datetime.now().isoformat()
@@ -1224,15 +1651,22 @@ def run_scan():
                 if recently_sent(ticker, signals):
                     print("  -> Bereits gesendet")
                     continue
-                print("  SIGNAL! Suche Derivate...")
+                print("  SIGNAL! Suche Derivate + DNA...")
                 derivate_text = fetch_derivate(ticker, info, a["price"])
+                # Signal DNA Daten sammeln
+                fear_greed = get_fear_greed()
+                macro      = get_macro_data()
+                reddit      = get_reddit_sentiment(ticker)
+                stocktwits  = get_stocktwits_sentiment(ticker)
+                news        = get_news_sentiment(ticker, info.get("name", ticker))
                 try:
                     sig = get_claude_signal(ticker, a, info)
                 except Exception as e:
                     sig = "Analyse nicht verfuegbar."
 
                 sig_msg = build_signal_msg(
-                    ticker, info, a, info["megatrend"], sig, now, derivate_text
+                    ticker, info, a, info["megatrend"], sig, now, derivate_text,
+                    fear_greed=fear_greed, macro=macro, reddit=reddit, news=news, stocktwits=stocktwits
                 )
                 if send_telegram(sig_msg):
                     signals[ticker] = datetime.now().isoformat()
