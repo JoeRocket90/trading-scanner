@@ -1,0 +1,260 @@
+name: 🧠 Auto-Optimizer (Claude analysiert + optimiert)
+
+on:
+  schedule:
+    # Jeden Morgen um 06:30 MEZ (04:30 UTC) — vor dem ersten Scan
+    - cron: "30 4 * * 1-5"
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Python Setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Pakete installieren
+        run: pip install requests anthropic --quiet
+
+      - name: Claude analysiert Performance + optimiert Scanner
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 << 'PYEOF'
+          import os, json, requests, anthropic
+          from datetime import datetime, timedelta
+
+          token   = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_ID"]
+          api_key = os.environ["ANTHROPIC_API_KEY"]
+
+          def tg(text):
+              try:
+                  requests.post(
+                      f"https://api.telegram.org/bot{token}/sendMessage",
+                      json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                      timeout=10
+                  )
+              except:
+                  pass
+
+          def load_performance():
+              """Laedt Performance-Daten aus sent_signals.json."""
+              try:
+                  with open("sent_signals.json", "r") as f:
+                      data = json.load(f)
+              except:
+                  return None
+
+              signals   = data.get("signals", {})
+              positions = data.get("positions", {})
+
+              # Statistiken berechnen
+              total_signals = len(signals)
+              open_positions = len(positions)
+
+              # Closed positions analysieren (aus History falls vorhanden)
+              history = data.get("history", [])
+              wins    = sum(1 for h in history if h.get("pnl", 0) > 0)
+              losses  = sum(1 for h in history if h.get("pnl", 0) <= 0)
+              avg_pnl = sum(h.get("pnl", 0) for h in history) / max(len(history), 1)
+
+              return {
+                  "total_signals":   total_signals,
+                  "open_positions":  open_positions,
+                  "closed_trades":   len(history),
+                  "wins":            wins,
+                  "losses":          losses,
+                  "win_rate":        round(wins / max(len(history), 1) * 100, 1),
+                  "avg_pnl":         round(avg_pnl, 2),
+                  "recent_signals":  list(signals.keys())[-10:],
+                  "positions":       positions,
+              }
+
+          def load_scanner_code():
+              """Laedt aktuellen Scanner-Code."""
+              try:
+                  with open("scripts/scanner.py", "r") as f:
+                      return f.read()
+              except:
+                  return ""
+
+          # Performance laden
+          perf = load_performance()
+          code = load_scanner_code()
+
+          if not code:
+              print("Scanner-Code nicht gefunden")
+              exit(0)
+
+          if not perf:
+              print("Keine Performance-Daten vorhanden — ueberspringe Optimierung")
+              exit(0)
+
+          # Nur optimieren wenn genug Daten vorhanden
+          if perf["total_signals"] < 3:
+              print(f"Zu wenig Signale ({perf['total_signals']}) — ueberspringe")
+              exit(0)
+
+          print(f"Performance: {perf['total_signals']} Signale | "
+                f"{perf['win_rate']}% Win-Rate | "
+                f"Avg PnL: {perf['avg_pnl']}%")
+
+          tg(f"🧠 <b>Auto-Optimizer gestartet</b>\n"
+             f"Analysiere {perf['total_signals']} Signale...\n"
+             f"Win-Rate: {perf['win_rate']}% | Avg PnL: {perf['avg_pnl']}%")
+
+          # Claude um Analyse bitten
+          client = anthropic.Anthropic(api_key=api_key)
+
+          # Nur relevante Teile des Codes senden (Konfiguration + Scoring)
+          code_lines = code.split("\n")
+          config_section = "\n".join(code_lines[:150])  # Header + Config + Watchlist
+
+          prompt = f"""Du bist ein quantitativer Trading-System-Entwickler.
+Analysiere die Performance unseres Trading-Scanners und schlage KONKRETE Code-Anpassungen vor.
+
+## Aktueller System-Status:
+- Gesendete Signale (gesamt): {perf['total_signals']}
+- Offene Positionen: {perf['open_positions']}
+- Abgeschlossene Trades: {perf['closed_trades']}
+- Win-Rate: {perf['win_rate']}%
+- Durchschnittlicher PnL: {perf['avg_pnl']}%
+- Letzte Signale: {', '.join(perf['recent_signals'])}
+- Markt-Kontext: Iran-Konflikt, erhöhte Volatilität, Rüstung stark
+
+## Aktuelle Scanner-Konfiguration:
+```python
+{config_section}
+```
+
+## Deine Aufgabe:
+Analysiere und entscheide ob Anpassungen sinnvoll sind.
+
+Antworte NUR im folgenden JSON-Format:
+{{
+  "should_update": true/false,
+  "reason": "Kurze Begründung (1-2 Sätze)",
+  "changes": [
+    {{
+      "parameter": "MIN_SCORE",
+      "old_value": "6",
+      "new_value": "7",
+      "reason": "Win-Rate unter 40% deutet auf zu niedrige Einstiegshürde"
+    }}
+  ],
+  "telegram_message": "Kurze Nachricht für Trader (2-3 Sätze, Emojis)"
+}}
+
+Wichtige Regeln:
+- Ändere NUR Zahlen/Parameter, KEINE Logik
+- Max. 3 Änderungen pro Update
+- should_update = false wenn Win-Rate > 60% oder weniger als 5 Trades
+- Sei konservativ — lieber keine Änderung als eine schlechte
+"""
+
+          print("Claude analysiert...")
+          response = client.messages.create(
+              model="claude-sonnet-4-6",
+              max_tokens=1000,
+              messages=[{"role": "user", "content": prompt}]
+          )
+
+          raw = response.content[0].text.strip()
+          print("Claude Antwort:", raw[:200])
+
+          # JSON parsen
+          import re
+          json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+          if not json_match:
+              print("Kein JSON gefunden — ueberspringe")
+              exit(0)
+
+          result = json.loads(json_match.group())
+
+          if not result.get("should_update", False):
+              print("Keine Optimierung noetig:", result.get("reason", ""))
+              tg(f"🧠 <b>Auto-Optimizer:</b> Keine Anpassung nötig\n"
+                 f"📊 {result.get('reason', 'System läuft optimal')}")
+              exit(0)
+
+          # Änderungen anwenden
+          changes = result.get("changes", [])
+          if not changes:
+              print("Keine Änderungen vorgeschlagen")
+              exit(0)
+
+          updated_code = code
+          applied = []
+
+          for change in changes[:3]:  # Max 3 Änderungen
+              param   = change.get("parameter", "")
+              old_val = change.get("old_value", "")
+              new_val = change.get("new_value", "")
+              reason  = change.get("reason", "")
+
+              if not param or not old_val or not new_val:
+                  continue
+
+              # Sicherheits-Check: nur bekannte Parameter
+              allowed = ["MIN_SCORE", "TOP_N", "ANTI_SPAM_HOURS",
+                        "TSL_TRIGGER_PCT", "TP_TOLERANCE"]
+              if param not in allowed:
+                  print(f"Parameter {param} nicht erlaubt — überspringe")
+                  continue
+
+              # Ersetzen
+              old_line = f"{param}       = {old_val}"
+              new_line = f"{param}       = {new_val}"
+              if old_line not in updated_code:
+                  # Flexiblerer Match
+                  pattern = re.compile(rf"^({param}\s*=\s*){re.escape(old_val)}", re.MULTILINE)
+                  updated_code = pattern.sub(rf"\g<1>{new_val}", updated_code)
+
+              applied.append(f"  • {param}: {old_val} → {new_val} ({reason})")
+              print(f"Geändert: {param} {old_val} → {new_val}")
+
+          if not applied:
+              print("Keine Änderungen anwendbar")
+              exit(0)
+
+          # Code speichern
+          with open("scripts/scanner.py", "w") as f:
+              f.write(updated_code)
+
+          # Telegram Benachrichtigung
+          changes_text = "\n".join(applied)
+          tg_msg = result.get("telegram_message", "")
+
+          tg(f"🧠 <b>Auto-Optimizer: Scanner angepasst!</b>\n\n"
+             f"📊 <b>Änderungen:</b>\n{changes_text}\n\n"
+             f"💡 {tg_msg}\n\n"
+             f"⚠️ Kein Anlageberater!")
+
+          print("Optimierung abgeschlossen")
+          PYEOF
+
+      - name: Commit optimierter Scanner
+        run: |
+          git config user.name "Claude Auto-Optimizer"
+          git config user.email "optimizer@trading-scanner.auto"
+          git add scripts/scanner.py
+          git diff --staged --quiet && echo "Keine Aenderungen" || git commit -m "🧠 Auto-Optimizer: $(date '+%d.%m.%Y') — Claude Optimierung"
+          git push || true
+
