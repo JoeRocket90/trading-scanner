@@ -35,14 +35,18 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          LAST_UPDATE_ID: ${{ vars.LAST_UPDATE_ID }}
         run: |
           python3 << 'PYEOF'
           import os, requests, re
 
           token   = os.environ["TELEGRAM_BOT_TOKEN"]
           chat_id = os.environ["TELEGRAM_CHAT_ID"]
-          last_id = int(os.environ.get("LAST_UPDATE_ID", "0") or "0")
+          # ID aus Datei lesen (robuster als GitHub Variable)
+          try:
+              with open(".last_update_id", "r") as f:
+                  last_id = int(f.read().strip() or "0")
+          except:
+              last_id = int(os.environ.get("LAST_UPDATE_ID", "0") or "0")
 
           url  = f"https://api.telegram.org/bot{token}/getUpdates"
           resp = requests.get(url, params={"offset": last_id + 1, "timeout": 5})
@@ -264,15 +268,18 @@ jobs:
               json={'chat_id': os.environ['TELEGRAM_CHAT_ID'], 'parse_mode': 'HTML',
                     'text': '🚀 <b>Scanner aktualisiert!</b>\nNeuer Code ist live.'})"
 
-      # ── UPDATE-ID SPEICHERN ──────────────────────────────────────────────────
+      # ── UPDATE-ID SPEICHERN (Datei im Repo) ────────────────────────────────────
       - name: Update-ID speichern
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEW_ID: ${{ steps.check.outputs.new_last_id }}
-          REPO: ${{ github.repository }}
         run: |
           if [ -n "$NEW_ID" ] && [ "$NEW_ID" != "0" ]; then
-            gh variable set LAST_UPDATE_ID --body "$NEW_ID" --repo "$REPO" || true
+            echo "$NEW_ID" > .last_update_id
+            git config user.name "Trading Bot"
+            git config user.email "bot@trading-scanner.auto"
+            git add .last_update_id
+            git diff --staged --quiet || git commit -m "🔖 Update-ID: $NEW_ID"
+            git push || true
             echo "Update-ID gespeichert: $NEW_ID"
           fi
